@@ -9,12 +9,12 @@ RESULTS_DIR = os.path.join(BASE_DIR, "results")
 # Settings derived from the notebook
 MODEL_SETTINGS ={
         "batch_size": 200,
-        "epochs": 600,
+        "epochs": 1000,
         "lr": 5e-4,
         "nf": 64,
-        "model": "gmn",
+        "model": "dgn",
         "attention": 0,
-        "n_layers": 4,
+        "n_layers": 1,
         "max_testing_samples": 600,
         "max_training_samples": 200,
         "data_dir": DATA_DIR,

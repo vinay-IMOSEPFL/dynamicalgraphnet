@@ -70,7 +70,7 @@ def main():
                     trainer.train(batch)
                 
                 # Validation every 5 epochs as per notebook cell 54
-                if epoch % 1 == 0:
+                if epoch % 5 == 0:
                     trainer.test(val_loader, mode='val', epoch=epoch)
                     trainer.test(test_loader, mode='test')
                 
