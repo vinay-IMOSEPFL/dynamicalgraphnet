@@ -108,8 +108,8 @@ def visualize_multi_step(
         # — rollout & per-step plotting —
         graph = data.clone().to(device)
         for step in steps:
-            dv, dx,prev_vel = model(graph.detach())
-            graph.prev_vel = prev_vel
+            dv, dx = model(graph.detach())
+            graph.prev_vel = graph.vel
             graph.vel      = graph.vel + dv
             graph.pos      = graph.pos + dx
 

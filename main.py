@@ -55,12 +55,14 @@ def main():
         return (stat[0].to(device), stat[1].to(device)) if isinstance(stat, tuple) else stat.to(device)
     train_stats = tuple(to_dev(s) for s in raw_stats)
 
+    step_interval = 30
+
     # Model
-    t_step = 30 * MODEL_SETTINGS["time_step"] if MODEL_SETTINGS["finite_diff"] else 30 * 1.0
-    model = DynamicsSolver(t_step, train_stats, num_jumps=1, num_msgs=4, latent_size=64).to(device) # num_msgs=4 from cell 22 output/code
+    t_step = step_interval * MODEL_SETTINGS["time_step"] if MODEL_SETTINGS["finite_diff"] else step_interval * 1.0
+    model = DynamicsSolver(t_step, train_stats, num_jumps=1, num_msgs=5, latent_size=64).to(device) # num_msgs=4 from cell 22 output/code
     
     optimizer = optim.Adam(model.parameters(), lr=MODEL_SETTINGS["lr"])
-    trainer = Trainer(model, optimizer, device, train_stats, SAVED_MODELS_DIR)
+    trainer = Trainer(model, optimizer, device, train_stats, step_interval, SAVED_MODELS_DIR)
 
     if args.mode == 'train':
         print(f"Training for {MODEL_SETTINGS['epochs']} epochs...")

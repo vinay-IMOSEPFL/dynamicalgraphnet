@@ -63,10 +63,10 @@ class InteractionEncoder(nn.Module):
     def __init__(self, latent_size):
         super(InteractionEncoder, self).__init__()
         self.edge_feat_encoder = build_mlp_d(9, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
-        self.edge_encoder = build_mlp_d(2, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
+        self.edge_encoder = build_mlp_d(3, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
         self.interaction_encoder = build_mlp_d(3*latent_size, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
 
-    def forward(self, edge_index, edge_dx_, edge_attr, vector_a, vector_b, vector_c,
+    def forward(self, edge_index, edge_dx_, edge_dt_,edge_attr, vector_a, vector_b, vector_c,
                 senders_v_t_, senders_v_tm1_, senders_w_t_,
                 receivers_v_t_, receivers_v_tm1_, receivers_w_t_,
                 node_latent):
@@ -109,7 +109,8 @@ class InteractionEncoder(nn.Module):
         
         # Edge encodings
         edge_dx_norm = edge_dx_.norm(dim=1, keepdim=True)
-        edge_latent = self.edge_encoder(torch.cat((edge_dx_norm, edge_attr), dim=1))
+        edge_dt_norm = edge_dt_.norm(dim=1, keepdim=True)
+        edge_latent = self.edge_encoder(torch.cat((edge_dx_norm, edge_dt_norm,edge_attr), dim=1))
 
         # Encode features
         senders_latent = self.edge_feat_encoder(senders_features)
@@ -198,7 +199,7 @@ class Scaler(torch.nn.Module):
     def __init__(self):
         super(Scaler, self).__init__()
 
-    def forward(self, senders_v_t, senders_v_tm1, receivers_v_t, receivers_v_tm1, edge_dx, train_stats):
+    def forward(self, senders_v_t, senders_v_tm1, senders_w_t, receivers_v_t, receivers_v_tm1, receivers_w_t, edge_dx, train_stats):
         stat_edge_dx, stat_node_v_t, _, _ = train_stats
         
         # Use detach on stats to ensure no gradients flow back to stats (redundant but safe)
@@ -206,8 +207,10 @@ class Scaler(torch.nn.Module):
         
         senders_v_t_ = senders_v_t / v_scale
         senders_v_tm1_ = senders_v_tm1 / v_scale
+        senders_w_t_ = senders_w_t / v_scale
         receivers_v_t_ = receivers_v_t / v_scale
         receivers_v_tm1_ = receivers_v_tm1 / v_scale
+        receivers_w_t_ = receivers_w_t/ v_scale
         
         norm_edge_dx = edge_dx.norm(dim=1, keepdim=True)
         # Avoid division by zero
@@ -220,7 +223,7 @@ class Scaler(torch.nn.Module):
         scaled_mag = (norm_edge_dx - min_stat.detach()) / scale_denom
         edge_dx_ = scaled_mag * (edge_dx / safe_norm)
         
-        return senders_v_t_, senders_v_tm1_, receivers_v_t_, receivers_v_tm1_, edge_dx_.detach()
+        return senders_v_t_, senders_v_tm1_, senders_w_t_, receivers_v_t_, receivers_v_tm1_, receivers_w_t_, edge_dx_.detach()
 
 class Interaction_Block(torch.nn.Module):
     def __init__(self, latent_size):
@@ -230,13 +233,13 @@ class Interaction_Block(torch.nn.Module):
         self.internal_dv_decoder = Node_Internal_Dv_Decoder(latent_size)
         self.layer_norm = nn.LayerNorm(latent_size)
 
-    def forward(self, edge_index, senders_pos, receivers_pos, edge_dx_, edge_attr, vector_a, vector_b, vector_c, 
+    def forward(self, edge_index, senders_pos, receivers_pos, edge_dx_, edge_dt_,edge_attr, vector_a, vector_b, vector_c, 
                 senders_v_t_, senders_v_tm1_, senders_w_t_,
                 receivers_v_t_, receivers_v_tm1_, receivers_w_t_,
                 node_latent, residue=None, latent_history=False):
             
         interaction_latent = self.interaction_encoder(
-            edge_index, edge_dx_, edge_attr,
+            edge_index, edge_dx_, edge_dt_, edge_attr,
             vector_a, vector_b, vector_c,
             senders_v_t_, senders_v_tm1_, senders_w_t_,
             receivers_v_t_, receivers_v_tm1_, receivers_w_t_,
@@ -274,6 +277,67 @@ class DynamicsSolver(torch.nn.Module):
         self.sub_tstep = sample_step / num_msgs
         self.train_stats = train_stats
 
+    def calc_orientation(self, pos, vel):
+        """
+        Calculates node-wise Orientation and Angular Velocity relative to the 
+        Global PCA Reference Frame of the point cloud.
+
+        Logic:
+        1. Centroid = Mean(pos).
+        2. Reference Frame = Eigenvectors of Gram Matrix (PCA).
+        3. Orientation = Radius vector (pos - centroid) projected into this Frame.
+        4. Angular Velocity = Calculated from relative velocity (v = w x r) in this Frame.
+        """
+        # 1. Calculate Centroid and Mean Velocity
+        # [1, 3] assuming pos is [N, 3]
+        centroid = pos.mean(dim=0, keepdim=True)
+        mean_vel = vel.mean(dim=0, keepdim=True)
+
+        # 2. Relative Vectors (Global Frame)
+        # r_global: Radius vector from centroid to node
+        r_global = pos - centroid
+        v_rel_global = vel - mean_vel
+
+        # 3. Establish Global Reference Frame (Basis)
+        # Gram Matrix G = X^T * X
+        G = torch.matmul(r_global.T, r_global)
+
+        # Eigenvectors form the Basis (Columns are axes)
+        # eig_vals are sorted ascending, so e_vecs[:, -1] is the principal axis
+        try:
+            _, eig_vecs = torch.linalg.eigh(G)
+        except torch.linalg.LinAlgError:
+            # Fallback for degenerate geometry
+            eig_vecs = torch.eye(3, device=pos.device)
+
+        # Basis R = [e1, e2, e3] (The Reference Frame)
+        R_basis = eig_vecs
+
+        # 4. Project into Reference Frame (Calculate Orientation)
+        # We transform the global radius vector into the local PCA frame.
+        # This makes the feature SE(3) invariant (moves/rotates with the cloud).
+        # orientation_i = R^T * r_global_i
+        
+        orientation = torch.matmul(r_global, R_basis)
+
+        # 5. Calculate Angular Velocity
+        # First, project relative velocity into the same Reference Frame
+        v_local = torch.matmul(v_rel_global, R_basis)
+
+        # Calculate Omega from v = w x r
+        # Inverting for orthogonal w: w = (r x v) / |r|^2
+        # This gives the orbital angular velocity of the node around the centroid
+        
+        radius_sq = (orientation**2).sum(dim=1, keepdim=True).clamp(min=1e-6)
+        
+        # Cross product in the local frame
+        omega = torch.cross(orientation, v_local, dim=1)
+        
+        # Normalize by radius squared
+        angular_velocity = omega / radius_sq
+
+        return orientation.detach(), angular_velocity.detach()
+
     def forward(self, graph):
         # Data preparation
         pos = graph.pos.float()
@@ -293,18 +357,20 @@ class DynamicsSolver(torch.nn.Module):
         node_v_tm1 = prev_vel
         
         # Get or initialize angular quantities (optimization: use safe defaults directly)
-        node_w_t = getattr(graph, 'node_w_t', torch.zeros_like(vel))
+        node_th_t,node_w_t = self.calc_orientation(pos,vel)
         
         # Initialize Accumulators
         sum_node_dv = torch.zeros_like(vel)
         sum_node_dx = torch.zeros_like(vel)
         
         # Pre-compute Node Latent (static per step)
-        node_latent = self.node_encoder(torch.cat((node_type, vel.norm(dim=1, keepdim=True)), dim=1))
+        node_latent = self.node_encoder(torch.cat((node_type, vel.norm(dim=1, keepdim=True)), dim=1))       
         
         # Initialize iteration vars
         current_pos = pos
+        current_orient = node_th_t
         current_edge_dx = current_pos[receivers] - current_pos[senders]
+        current_edge_dt = current_orient[receivers] - current_orient[senders]
         
         # Residue state for RNN-like message passing
         residue = None
@@ -319,15 +385,16 @@ class DynamicsSolver(torch.nn.Module):
             s_wt = node_w_t[senders]
             r_wt = node_w_t[receivers]
 
+            
             # Scaling
-            s_vt_, s_vtm1_, r_vt_, r_vtm1_, edge_dx_ = self.scaler(
-                s_vt, s_vtm1, r_vt, r_vtm1, current_edge_dx, self.train_stats
+            s_vt_, s_vtm1_, s_wt_, r_vt_, r_vtm1_,r_wt_, edge_dx_ = self.scaler(
+                s_vt, s_vtm1, s_wt, r_vt, r_vtm1, r_wt, current_edge_dx, self.train_stats
             )
 
             # Reference Frame
             vec_a, vec_b, vec_c = self.refframecalc(
                 edge_index, current_pos[senders], current_pos[receivers],
-                s_vt_, r_vt_, s_wt, r_wt
+                s_vt, r_vt, s_wt, r_wt
             )
 
             # Interaction Block
@@ -336,9 +403,9 @@ class DynamicsSolver(torch.nn.Module):
             
             node_dv, node_dw, residue = layer(
                 edge_index, current_pos[senders], current_pos[receivers],
-                edge_dx_, edge_attr, vec_a, vec_b, vec_c,
-                s_vt_, s_vtm1_, s_wt,
-                r_vt_, r_vtm1_, r_wt,
+                current_edge_dx, current_edge_dt, edge_attr, vec_a, vec_b, vec_c,
+                s_vt, s_vtm1, s_wt,
+                r_vt, r_vtm1, r_wt,
                 node_latent, residue=residue, latent_history=history_flag
             )
 
@@ -363,10 +430,12 @@ class DynamicsSolver(torch.nn.Module):
             # Calculate Displacement for this sub-step
             # dx = (v_new + v_old) * 0.5 * dt
             step_disp = (node_v_t + node_vf) * (0.5 * self.sub_tstep)
+            step_ang_disp = (node_w_t + node_wf) * (0.5 * self.sub_tstep)
             sum_node_dx[mask_body] += step_disp[mask_body]
 
             # Update Position
             current_pos = current_pos + step_disp # Out-of-place to preserve graph.pos if needed elsewhere, but safe here.
+            current_orient = current_orient + step_ang_disp
 
             # Prepare for next iteration
             node_v_tm1 = node_v_t 
@@ -375,5 +444,7 @@ class DynamicsSolver(torch.nn.Module):
             
             # Update edge vector for next step
             current_edge_dx = current_pos[receivers] - current_pos[senders]
+            current_edge_dt = current_orient[receivers] - current_orient[senders]
 
-        return sum_node_dv, sum_node_dx
+
+        return sum_node_dv, sum_node_dx, node_v_tm1

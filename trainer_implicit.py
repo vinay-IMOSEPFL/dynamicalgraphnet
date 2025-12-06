@@ -2,10 +2,10 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils import evaluate
+from utils_implicit import evaluate
 
 class Trainer:
-    def __init__(self, model, optimizer, device, train_stats, step_interval,save_model_dir):
+    def __init__(self, model, optimizer, device, train_stats, step_interval, save_model_dir):
         self.model = model
         self.optimizer = optimizer
         self.device = device
@@ -21,22 +21,24 @@ class Trainer:
         # Initialize best test loss and best epoch.
         self.best_val_loss = float('inf')
         self.best_model_path = None
-        self.best_epoch = None        
-        self.step_interval = step_interval
+        self.best_epoch = None     
+
+        self.step_interval = step_interval   
 
     def train(self, train_graph):
         self.model.train()
-        pred_node_dvel,pred_node_disp= self.model(train_graph.to(self.device))
+        pred_node_dvel,pred_node_disp,residual= self.model(train_graph.to(self.device))
 
         actual_node_dvel = (train_graph.y_dv).float().to(self.device)
         actual_node_disp = (train_graph.y_dx).float().to(self.device)
+        actual_residual = torch.zeros_like(actual_node_dvel.norm(dim=1,keepdim=True)).float().to(self.device)
 
         pred_node_dvel_ = (pred_node_dvel-self.mean_node_dv.detach())/self.std_node_dv.detach()
         pred_node_disp_ = (pred_node_disp-self.mean_node_disp.detach())/self.std_node_disp.detach()
         actual_node_dvel_ = (actual_node_dvel - self.mean_node_dv.detach())/self.std_node_dv.detach()
         actual_node_disp_ = (actual_node_disp-self.mean_node_disp.detach())/self.std_node_disp.detach()
 
-        loss = F.mse_loss(pred_node_disp_,actual_node_disp_) + F.mse_loss(pred_node_dvel_,actual_node_dvel_)
+        loss = (F.mse_loss(pred_node_disp_,actual_node_disp_) + F.mse_loss(pred_node_dvel_,actual_node_dvel_) + 2*F.mse_loss(residual, actual_residual))/(4.0)
         self.optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -48,7 +50,7 @@ class Trainer:
         self.model.eval()
         mean_pos_error = evaluate(test_loader,
                             self.model,
-                            self.device)
+                            self.device, step_interval = self.step_interval)
         
         
         if mode == 'val':
@@ -68,5 +70,5 @@ class Trainer:
         if self.best_model_path and os.path.exists(self.best_model_path):
             os.remove(self.best_model_path)
         self.best_model_path = os.path.join(self.model_dir, 
-                                 f'Val_Loss_{self.val_loss_pos:.5f}mm_iter{iteration}.pth')
+                                 f'GenLoss_{self.val_loss_pos:.5f}mm_iter{iteration}.pth')
         torch.save(self.model.state_dict(), self.best_model_path)

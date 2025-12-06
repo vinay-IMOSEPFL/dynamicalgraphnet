@@ -14,7 +14,7 @@ MODEL_SETTINGS ={
         "nf": 64,
         "model": "dgn",
         "attention": 0,
-        "n_layers": 2,
+        "n_layers":2,
         "max_testing_samples": 600,
         "max_training_samples": 200,
         "data_dir": DATA_DIR,

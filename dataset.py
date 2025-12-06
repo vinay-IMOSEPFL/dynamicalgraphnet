@@ -11,6 +11,8 @@ class HumanDataset(torch.utils.data.Dataset):
         self.data_dir = data_dir
         self.nsteps = nsteps
 
+        # Define the step interval (delta t)
+        self.step_interval = 30  # e.g., 30 frames
         # --- load raw data --------------------------------------
         with open(os.path.join(data_dir, 'motion.pkl'), 'rb') as f:
             edges, X = pkl.load(f)
@@ -36,13 +38,14 @@ class HumanDataset(torch.utils.data.Dataset):
                 mapping = {}
                 for i in case_ids:
                     core_len = Ps[i].shape[0]                    # <<— use length after central_diff
-                    safe_max = core_len - self.nsteps*30 - 1
-                    if safe_max < 0:
+                    max_start_index = core_len - self.nsteps*self.step_interval - 1
+                    min_start_index = self.step_interval
+                    if max_start_index< min_start_index:
                         raise ValueError(f"Trial {i} too short for look-ahead of {self.nsteps} steps.")
                     # competitor caps at 300
-                    itv = min(300, safe_max + 1)                # +1 because j in [0..safe_max]
-                    pool = np.arange(itv)                       # j ∈ [0..itv-1]
-                    mapping[i] = np.random.choice(pool, size=100, replace=False)
+                    itv = min(300, max_start_idx - min_start_idx + 1)               # +1 because j in [0..safe_max]
+                    pool =np.arange(min_start_idx, min_start_idx + pool_size)                      # j ∈ [0..itv-1]
+                    mapping[i] = np.random.choice(pool, size=min(100, len(pool)), replace=False)
                 return mapping
 
             train_mapping = make_map(train_case_id)
@@ -67,11 +70,11 @@ class HumanDataset(torch.utils.data.Dataset):
                 # note: they use delta_frame; you have nsteps*30, so this is identical
                 cur_x_t   = Ps[i][j]
                 cur_v_t   = Vs[i][j]
-                cur_v_tm1 = Vs[i][j-1]
-                y_dv      = Vs[i][j + self.nsteps*30] - Vs[i][j]
-                y_dx      = Ps[i][j + self.nsteps*30] - Ps[i][j]
-                y_pos_end = Ps[i][j + self.nsteps*30]
-                y_vel_end = Vs[i][j + self.nsteps*30]
+                cur_v_tm1 = Vs[i][j-self.step_interval]
+                y_dv      = Vs[i][j + self.nsteps*self.step_interval] - Vs[i][j]
+                y_dx      = Ps[i][j + self.nsteps*self.step_interval] - Ps[i][j]
+                y_pos_end = Ps[i][j + self.nsteps*self.step_interval]
+                y_vel_end = Vs[i][j + self.nsteps*self.step_interval]
 
                 in_graphs.append(self.create_in_graph(
                     edges,
@@ -241,6 +244,8 @@ class HumanDatasetSeq(torch.utils.data.Dataset):
         self.data_dir = data_dir
         self.nsteps = nsteps
 
+        self.step_interval = 30
+
         # --- load raw data --------------------------------------
         with open(os.path.join(data_dir, 'motion.pkl'), 'rb') as f:
             edges, X = pkl.load(f)
@@ -266,13 +271,14 @@ class HumanDatasetSeq(torch.utils.data.Dataset):
                 mapping = {}
                 for i in case_ids:
                     core_len = Ps[i].shape[0]                    # <<— use length after central_diff
-                    safe_max = core_len - self.nsteps*30 - 1
-                    if safe_max < 0:
+                    max_start_index = core_len - self.nsteps*self.step_interval - 1
+                    min_start_index = self.step_interval
+                    if max_start_index< min_start_index:
                         raise ValueError(f"Trial {i} too short for look-ahead of {self.nsteps} steps.")
                     # competitor caps at 300
-                    itv = min(300, safe_max + 1)                # +1 because j in [0..safe_max]
-                    pool = np.arange(itv)                       # j ∈ [0..itv-1]
-                    mapping[i] = np.random.choice(pool, size=100, replace=False)
+                    itv = min(300, max_start_idx - min_start_idx + 1)               # +1 because j in [0..safe_max]
+                    pool =np.arange(min_start_idx, min_start_idx + pool_size)                      # j ∈ [0..itv-1]
+                    mapping[i] = np.random.choice(pool, size=min(100, len(pool)), replace=False)
                 return mapping
 
             train_mapping = make_map(train_case_id)
@@ -297,12 +303,12 @@ class HumanDatasetSeq(torch.utils.data.Dataset):
                 # note: they use delta_frame; you have nsteps*30, so this is identical
                 cur_x_t   = Ps[i][j]
                 cur_v_t   = Vs[i][j]
-                cur_v_tm1 = Vs[i][j-1]
-                y_dv      = Vs[i][j + self.nsteps*30] - Vs[i][j]
-                y_dx      = Ps[i][j + self.nsteps*30] - Ps[i][j]
-                gt_seq = [ Ps[i][j + k*30] for k in range(self.nsteps+1) ]   # list of (31,3) arrays
-                y_pos_end = Ps[i][j + self.nsteps*30]
-                y_vel_end = Vs[i][j + self.nsteps*30]
+                cur_v_tm1 = Vs[i][j-self.step_interval]
+                y_dv      = Vs[i][j + self.nsteps*self.step_interval] - Vs[i][j]
+                y_dx      = Ps[i][j + self.nsteps*self.step_interval] - Ps[i][j]
+                gt_seq = [ Ps[i][j + k*self.step_interval] for k in range(self.nsteps+1) ]   # list of (31,3) arrays
+                y_pos_end = Ps[i][j + self.nsteps*self.step_interval]
+                y_vel_end = Vs[i][j + self.nsteps*self.step_interval]
 
                 in_graphs.append(self.create_in_graph(
                     edges,

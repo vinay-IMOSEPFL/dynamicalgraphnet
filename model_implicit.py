@@ -6,9 +6,9 @@ from config import MODEL_SETTINGS
 class RefFrameCalc(nn.Module):
     def __init__(self):
         super(RefFrameCalc, self).__init__()
-        self.epsilon = 1e-7
+        self.epsilon = 1e-6
 
-    def forward(self, edge_index, senders_pos, receivers_pos, senders_vel, receivers_vel, senders_omega, receivers_omega):
+    def forward(self, edge_index, senders_pos, receivers_pos, senders_vel, receivers_vel):
         # Calculate relative position (Edge vector)
         rel_pos = receivers_pos - senders_pos
         dist = rel_pos.norm(dim=1, keepdim=True).clamp(min=self.epsilon)
@@ -20,8 +20,6 @@ class RefFrameCalc(nn.Module):
         diff_vel = receivers_vel - senders_vel
         sum_vel = senders_vel + receivers_vel
         
-        diff_omega = receivers_omega - senders_omega
-        sum_omega = senders_omega + receivers_omega
 
         # Helper for normalizing
         def normalize(tensor):
@@ -29,11 +27,9 @@ class RefFrameCalc(nn.Module):
 
         b_a = normalize(torch.cross(diff_vel, vector_a, dim=1))
         b_c = normalize(sum_vel)
-        b_a_ = normalize(torch.cross(diff_omega, vector_a, dim=1))
-        b_c_ = normalize(sum_omega)
 
         # Combine to form b
-        b = b_a + b_c + b_a_ + b_c_
+        b = b_a + b_c 
 
         # Gram-Schmidt like orthogonalization
         # Project b onto a
@@ -62,13 +58,13 @@ class InteractionEncoder(nn.Module):
 
     def __init__(self, latent_size):
         super(InteractionEncoder, self).__init__()
-        self.edge_feat_encoder = build_mlp_d(9, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
+        self.edge_feat_encoder = build_mlp_d(6, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
         self.edge_encoder = build_mlp_d(2, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
         self.interaction_encoder = build_mlp_d(3*latent_size, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
 
     def forward(self, edge_index, edge_dx_, edge_attr, vector_a, vector_b, vector_c,
-                senders_v_t_, senders_v_tm1_, senders_w_t_,
-                receivers_v_t_, receivers_v_tm1_, receivers_w_t_,
+                senders_v_t_, senders_v_tm1_, 
+                receivers_v_t_, receivers_v_tm1_,
                 node_latent):
         
         senders, receivers = edge_index
@@ -95,17 +91,15 @@ class InteractionEncoder(nn.Module):
         # Project senders
         s_vt_proj   = project(senders_v_t_)
         s_vtm1_proj = project(senders_v_tm1_)
-        s_wt_proj   = project(senders_w_t_)
 
         # Project receivers (negated as per original code logic: -vector_a, etc.)
         # Note: Original code did v . (-a), v . (-b). This is equivalent to -(v . a).
         r_vt_proj   = -project(receivers_v_t_)
         r_vtm1_proj = -project(receivers_v_tm1_)
-        r_wt_proj   = -project(receivers_w_t_)
 
         # Concatenate features (9 features per node per edge)
-        senders_features = torch.cat([s_vt_proj, s_vtm1_proj, s_wt_proj], dim=1)
-        receivers_features = torch.cat([r_vt_proj, r_vtm1_proj, r_wt_proj], dim=1)
+        senders_features = torch.cat([s_vt_proj, s_vtm1_proj], dim=1)
+        receivers_features = torch.cat([r_vt_proj, r_vtm1_proj], dim=1)
         
         # Edge encodings
         edge_dx_norm = edge_dx_.norm(dim=1, keepdim=True)
@@ -126,73 +120,46 @@ class InteractionDecoder(torch.nn.Module):
     def __init__(self, latent_size=128):
         super(InteractionDecoder, self).__init__()
         self.i1_decoder = build_mlp_d(latent_size, latent_size, 3, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=False)
-        self.i2_decoder = build_mlp_d(latent_size, latent_size, 3, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=False)
-        self.f_scaler = build_mlp_d(latent_size, latent_size, 1, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=False)
-        self.node_weight_decoder = build_mlp_d(latent_size, latent_size, 1, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=False, use_sigmoid=True)
 
     def forward(self, edge_index, senders_pos, receivers_pos, vector_a, vector_b, vector_c, interaction_latent, node_latent):
         senders, receivers = edge_index
         
         # Decode coefficients
         coeff_f = self.i1_decoder(interaction_latent)
-        coeff_a = self.i2_decoder(interaction_latent)
-        lambda_ij = self.f_scaler(interaction_latent)
         
         # Reconstruct forces in global frame
         # Linear combination: c0*a + c1*b + c2*c
         fij = (coeff_f[:, 0:1] * vector_a + 
                coeff_f[:, 1:2] * vector_b + 
                coeff_f[:, 2:3] * vector_c) # Fixed slicing for clarity
-
-        aij = (coeff_a[:, 0:1] * vector_a + 
-               coeff_a[:, 1:2] * vector_b + 
-               coeff_a[:, 2:3] * vector_c)
-
-        # Node weights for torque center
-        w_s = self.node_weight_decoder(node_latent[senders])
-        w_r = self.node_weight_decoder(node_latent[receivers])
         
-        # Weighted center r0ij
-        denom = w_s + w_r + 1e-8 # Add epsilon for safety
-        r0ij = (w_s * senders_pos + w_r * receivers_pos) / denom
-        
-        # Compute torque
-        # tau = aij - (r_j - r0_ij) x (lambda * fij)
-        lever_arm = receivers_pos - r0ij
-        torque_contribution = torch.cross(lever_arm, fij * lambda_ij, dim=1)
-        tauij = aij - torque_contribution
-        
-        return fij, tauij
+        return fij
 
-class Node_Internal_Dv_Decoder(torch.nn.Module):
+class NodeResidualDecoder(torch.nn.Module):
     def __init__(self, latent_size=128):
-        super(Node_Internal_Dv_Decoder, self).__init__()
-        self.m_inv_decoder = build_mlp_d(latent_size, latent_size, 1, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=False)
-        self.i_inv_decoder = build_mlp_d(latent_size, latent_size, 1, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=False)
-        self.dv_ext_decoder = build_mlp_d(latent_size, latent_size, 3, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=False)
+        super(NodeResidualDecoder, self).__init__()
+        self.m_decoder = build_mlp_d(latent_size, latent_size, 1, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=False)
+        self.fext_decoder = build_mlp_d(latent_size, latent_size, 3, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=False)
 
-    def forward(self, edge_index, node_latent, fij, tij):
+    def forward(self, edge_index, node_latent, fij, node_acc):
         senders, receivers = edge_index   
         num_nodes = node_latent.shape[0]
         
         # Decode physical properties
-        m_inv = self.m_inv_decoder(node_latent)
-        i_inv = self.i_inv_decoder(node_latent)
+        m = self.m_decoder(node_latent)
+        fext = self.fext_decoder(node_latent)
         
         # Aggregate Forces and Torques
         # Use new_zeros to ensure device compatibility automatically
         out_fij = node_latent.new_zeros((num_nodes, 3))
-        out_tij = node_latent.new_zeros((num_nodes, 3))
+
         
         out_fij.index_add_(0, receivers, fij)
-        out_tij.index_add_(0, receivers, tij)
 
         # Compute accelerations
-        # F = ma => a = F * (1/m)
-        node_dv_int = m_inv * out_fij + self.dv_ext_decoder(node_latent)
-        node_dw_int = i_inv * out_tij
+        residual = m * node_acc + out_fij - fext
 
-        return node_dv_int, node_dw_int
+        return residual
 
 class Scaler(torch.nn.Module):
     def __init__(self):
@@ -227,40 +194,63 @@ class Interaction_Block(torch.nn.Module):
         super(Interaction_Block, self).__init__()
         self.interaction_encoder = InteractionEncoder(latent_size)
         self.interaction_decoder = InteractionDecoder(latent_size)
-        self.internal_dv_decoder = Node_Internal_Dv_Decoder(latent_size)
+        self.residual_decoder = NodeResidualDecoder(latent_size)
         self.layer_norm = nn.LayerNorm(latent_size)
 
     def forward(self, edge_index, senders_pos, receivers_pos, edge_dx_, edge_attr, vector_a, vector_b, vector_c, 
-                senders_v_t_, senders_v_tm1_, senders_w_t_,
-                receivers_v_t_, receivers_v_tm1_, receivers_w_t_,
-                node_latent, residue=None, latent_history=False):
+                senders_v_t_, senders_v_tm1_, 
+                receivers_v_t_, receivers_v_tm1_,
+                node_acc, node_latent, history=None, latent_history=False):
             
         interaction_latent = self.interaction_encoder(
             edge_index, edge_dx_, edge_attr,
             vector_a, vector_b, vector_c,
-            senders_v_t_, senders_v_tm1_, senders_w_t_,
-            receivers_v_t_, receivers_v_tm1_, receivers_w_t_,
+            senders_v_t_, senders_v_tm1_,
+            receivers_v_t_, receivers_v_tm1_,
             node_latent
         )
 
         # Residual connection
-        if latent_history and residue is not None:
-            interaction_latent = self.layer_norm(interaction_latent + residue)
+        if latent_history and history is not None:
+            interaction_latent = self.layer_norm(interaction_latent + history)
             #interaction_latent = self.layer_norm(interaction_latent)
         
         # Decode forces and torques
-        edge_force, edge_tau = self.interaction_decoder(
+        edge_force = self.interaction_decoder(
             edge_index, senders_pos, receivers_pos, 
             vector_a, vector_b, vector_c, 
             interaction_latent, node_latent
         )
         
         # Decode node updates
-        node_dv, node_dw = self.internal_dv_decoder(
-            edge_index, node_latent, edge_force, edge_tau
+        residual = self.residual_decoder(
+            edge_index, node_latent, edge_force, node_acc
         )
     
-        return node_dv, node_dw, interaction_latent
+        return residual, interaction_latent
+
+class Error_Corrector(nn.Module):
+    def __init__(self, latent_size):
+        super(Error_Corrector, self).__init__()
+        # Input: 2 scalars (Norm of Local Residual, Norm of Steered Residual)
+        # Output: 2 scalars (Alpha, Beta coefficients)
+        # We use a deeper or wider MLP if needed to capture non-linear scaling laws
+        self.corrector = build_mlp_d(
+            3, 
+            latent_size, 
+            2,  # [alpha, beta]
+            num_layers=MODEL_SETTINGS['n_layers'], 
+            lay_norm=False
+        )
+    
+    def forward(self, solver_input):
+        """
+        Args:
+            solver_input: [N, 2] Tensor containing [ ||Ri||, ||RGi|| ]
+        Returns:
+            coeffs: [N, 2] Tensor containing [alpha, beta]
+        """
+        return self.corrector(solver_input)
 
 class DynamicsSolver(torch.nn.Module):
     def __init__(self, sample_step, train_stats, num_jumps=1, num_msgs=1, latent_size=128):
@@ -270,12 +260,16 @@ class DynamicsSolver(torch.nn.Module):
         self.node_encoder = NodeEncoder(latent_size)
         self.interaction_proc_layer = Interaction_Block(latent_size)
         self.interaction_init_layer = Interaction_Block(latent_size)
+        self.corrector = Error_Corrector(latent_size)
         self.num_messages = num_msgs
+        self.dt = sample_step
         self.sub_tstep = sample_step / num_msgs
         self.train_stats = train_stats
 
     def forward(self, graph):
-        # Data preparation
+        # ---------------------------------------------------------
+        # 1. Data Preparation
+        # ---------------------------------------------------------
         pos = graph.pos.float()
         vel = graph.vel.float()
         prev_vel = graph.prev_vel.float()
@@ -284,96 +278,152 @@ class DynamicsSolver(torch.nn.Module):
         edge_index = graph.edge_index.long()
         senders, receivers = edge_index
 
-        # Mask for nodes that are NOT reflected (type != 2)
-        # Using a boolean mask is faster for indexing
+        # Mask for movable nodes (Body). Wall/Boundary nodes (type == 2) are fixed.
         mask_body = (graph.node_type != 2).squeeze()
 
-        # Initial State
-        node_v_t = vel
-        node_v_tm1 = prev_vel
+        # ---------------------------------------------------------
+        # 2. Newmark-Beta Predictor (Initial Guess)
+        # ---------------------------------------------------------
+        # Constants for unconditionally stable Average Acceleration Method
+        dt = self.dt # Ideally, pass this as self.dt or graph.dt
+        beta = 0.25
+        gamma = 0.5
+
+        # Calculate current acceleration (a_n) using backward difference
+        acc = (vel - prev_vel) / dt  
+
+        # Predict Displacement x_{n+1}
+        # x_{n+1}^0 = x_n + dt*v_n + (0.5 - beta)*dt^2*a_n
+        pred_disp = (vel * dt) + ((0.5 - beta) * (dt ** 2) * acc)
         
-        # Get or initialize angular quantities (optimization: use safe defaults directly)
-        node_w_t = getattr(graph, 'node_w_t', torch.zeros_like(vel))
+        # Guessed Position
+        node_x_t1 = pos + pred_disp
+
+        # Consistent Implicit Relations (Slave Variables)
+        # We enforce v_{n+1} and a_{n+1} to be consistent with the guessed x_{n+1}
         
-        # Initialize Accumulators
-        sum_node_dv = torch.zeros_like(vel)
-        sum_node_dx = torch.zeros_like(vel)
+        # a_{n+1} = (1 / beta*dt^2) * (x_{n+1} - x_n - dt*v_n) - (1/2beta - 1)*a_n
+        node_a_t1 = (1.0 / (beta * dt**2)) * (node_x_t1 - pos - dt * vel) - ((1.0 / (2 * beta)) - 1.0) * acc
+
+        # v_{n+1} = v_n + dt * ((1 - gamma)*a_n + gamma*a_{n+1})
+        node_v_t1 = vel + dt * ((1 - gamma) * acc + gamma * node_a_t1)
         
         # Pre-compute Node Latent (static per step)
-        node_latent = self.node_encoder(torch.cat((node_type, vel.norm(dim=1, keepdim=True)), dim=1))
+        node_latent = self.node_encoder(torch.hstack((node_type,vel.norm(dim=1,keepdim=True))))
         
-        # Initialize iteration vars
-        current_pos = pos
-        current_edge_dx = current_pos[receivers] - current_pos[senders]
-        
-        # Residue state for RNN-like message passing
-        residue = None
+        # Residue state for RNN-like message passing (Memory)
+        history = None
+        total_residual = torch.zeros_like(vel.norm(dim=1,keepdim=True))
 
+        # ---------------------------------------------------------
+        # 3. Implicit Solver Loop (Message Passing)
+        # ---------------------------------------------------------
         for i in range(self.num_messages):
-            # Gather node attributes for edges
-            # Optimization: Doing this inside loop is necessary as values update
-            s_vt = node_v_t[senders]
-            r_vt = node_v_t[receivers]
-            s_vtm1 = node_v_tm1[senders]
-            r_vtm1 = node_v_tm1[receivers]
-            s_wt = node_w_t[senders]
-            r_wt = node_w_t[receivers]
+            # A. Update Edge Geometry based on CURRENT guess
+            # Optimization: Doing this inside loop is necessary as positions update
+            edge_dx_t1 = node_x_t1[receivers] - node_x_t1[senders]
+            
+            # Prepare scaled inputs for the Physics/Interaction Block
+            # (Assuming s_vt_ etc are scaled versions of velocities)
+            s_vt = node_v_t1[senders]
+            r_vt = node_v_t1[receivers]
+            s_vtm1 = vel[senders] # v_n becomes "prev" inside the step context
+            r_vtm1 = vel[receivers]
 
             # Scaling
             s_vt_, s_vtm1_, r_vt_, r_vtm1_, edge_dx_ = self.scaler(
-                s_vt, s_vtm1, r_vt, r_vtm1, current_edge_dx, self.train_stats
+                s_vt, s_vtm1, r_vt, r_vtm1, edge_dx_t1, self.train_stats
             )
 
-            # Reference Frame
+            # B. Reference Frame Calculation
+            # Calculates local frames for equivariant message passing
             vec_a, vec_b, vec_c = self.refframecalc(
-                edge_index, current_pos[senders], current_pos[receivers],
-                s_vt_, r_vt_, s_wt, r_wt
+                edge_index, node_x_t1[senders], node_x_t1[receivers],
+                s_vt_, r_vt_
             )
 
-            # Interaction Block
+            # C. Interaction Block (Physics Residual Calculation)
+            # This predicts the force/momentum imbalance
             layer = self.interaction_init_layer if i == 0 else self.interaction_proc_layer
             history_flag = (i > 0)
             
-            node_dv, node_dw, residue = layer(
-                edge_index, current_pos[senders], current_pos[receivers],
+            # Note: Assuming 'residual' output here is the Force/Momentum Imbalance vector (Ri)
+            # Also assuming 'current_pos' in your snippet refers to 'node_x_t1'
+            Ri,history = layer(
+                edge_index, node_x_t1[senders], node_x_t1[receivers],
                 edge_dx_, edge_attr, vec_a, vec_b, vec_c,
-                s_vt_, s_vtm1_, s_wt,
-                r_vt_, r_vtm1_, r_wt,
-                node_latent, residue=residue, latent_history=history_flag
+                s_vt_, s_vtm1_,  # s_wt (angular) omitted based on context, add if needed
+                r_vt_, r_vtm1_,  # r_wt (angular) omitted based on context, add if needed
+                node_a_t1,node_latent, history=history, latent_history=history_flag
             )
 
-            # Integration (Symplectic Euler-ish)
-            # Update accumulators and states for body nodes only
+            # --- ACCUMULATE RESIDUAL ---
+            # We calculate the mean squared norm of the residual force vector
+            # This represents the "Physics Loss" for this iteration step
+            step_residual = Ri.norm(dim=1,keepdim=True)
             
-            # Apply updates
-            # Note: We can add directly to the tensors. 
-            # Using masked scatter/add is efficient.
+            # Optional: Weight later steps more heavily (Deep Supervision)
+            gamma_decay = 0.8 ** (self.num_messages - i - 1)
+            step_residual = gamma_decay * step_residual
+            total_residual = total_residual + step_residual
+
+
+            # D. Global Context Calculation (The Elliptic Bridge)
+            # Calculate Gram Matrix G = sum(Ri * Ri.T)
+            # Ri is [N, 3]. We sum over N to get [3, 3] Global Matrix.
+            # Using torch.matmul(Ri.T, Ri)
+            num_nodes = Ri.shape[0]
+            G = torch.matmul(Ri.T, Ri)/ (num_nodes + 1) # Shape [3, 3]
             
-            # Update Accumulators (Total Change)
-            sum_node_dv[mask_body] += node_dv[mask_body]
+            # Calculate Steered Residual (Tensor contraction)
+            # RGi = G * Ri (Matrix-Vector product per node)
+            # (N, 3) @ (3, 3).T -> (N, 3)
+            RGi = torch.matmul(Ri, G.T)
+
+            # 3. Safe Inputs for the Corrector Network
+            # The inputs [||Ri||, ||RGi||] have wildly different scales.
+            # Log-space transformation is safer for the network to learn.
+            norm_Ri = torch.norm(Ri, dim=1, keepdim=True)
+            norm_RGi = torch.norm(RGi, dim=1, keepdim=True)
+            alignment = (Ri * RGi).sum(dim=1, keepdim=True)     # [N, 1]
+
+
+            # E. Solver Block (Correction Prediction)
+            # Predict scalar coefficients alpha, beta based on invariant features
+            # Input: Norm of Local Residual and Norm of Steered Residual
+            solver_input = torch.cat([
+                norm_Ri,      # Local Energy
+                norm_RGi,     # Steered Energy
+                alignment,
+            ], dim=1)
             
+            # Assuming self.corrector outputs shape [N, 2] -> (alpha, beta)
+            coeffs = self.corrector(solver_input) 
+            c1 = coeffs[:, 0:1]
+            c2 = coeffs[:, 1:2]
+            #c3 = coeffs[:, 2:3]*self.dt
+
+            # Calculate Displacement Correction
+            delta_u = c1 * Ri + c2 * RGi
+            
+            # Apply Correction (Only to movable nodes)
+            # We zero out updates for boundary nodes to enforce Dirichlet BCs implicitly
+            delta_u[~mask_body] = 0.0*delta_u[~mask_body]
+            
+            pred_disp = pred_disp + delta_u
+            node_x_t1 = pos + pred_disp
+
+            # F. Update Kinematics (Slave Variables)
+            # Re-enforce Newmark consistency for the next iteration's residual calculation
+            
+            # Update Acceleration
+            # a_{n+1} = (1 / beta*dt^2) * (x_{n+1} - x_n - dt*v_n) - ...
+            node_a_t1 = (1.0 / (beta * dt**2)) * (node_x_t1 - pos - dt * vel) - ((1.0 / (2 * beta)) - 1.0) * acc
+
             # Update Velocity
-            node_vf = node_v_t.clone()
-            node_vf[mask_body] += node_dv[mask_body]
-            
-            # Update Angular Velocity
-            node_wf = node_w_t.clone()
-            node_wf[mask_body] += node_dw[mask_body]
+            # v_{n+1} = v_n + dt * ((1 - gamma)*a_n + gamma*a_{n+1})
+            node_v_t1 = vel + dt * ((1 - gamma) * acc + gamma * node_a_t1)
 
-            # Calculate Displacement for this sub-step
-            # dx = (v_new + v_old) * 0.5 * dt
-            step_disp = (node_v_t + node_vf) * (0.5 * self.sub_tstep)
-            sum_node_dx[mask_body] += step_disp[mask_body]
-
-            # Update Position
-            current_pos = current_pos + step_disp # Out-of-place to preserve graph.pos if needed elsewhere, but safe here.
-
-            # Prepare for next iteration
-            node_v_tm1 = node_v_t 
-            node_v_t = node_vf
-            node_w_t = node_wf
-            
-            # Update edge vector for next step
-            current_edge_dx = current_pos[receivers] - current_pos[senders]
-
-        return sum_node_dv, sum_node_dx
+        # Return final state
+        # vel (current input v_n) becomes the "prev_vel" for the next time step
+        return node_v_t1-vel, node_x_t1-pos, total_residual

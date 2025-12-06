@@ -6,38 +6,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 def set_seed(seed=42):
-    """Sets the seed for reproducibility as defined in Cell 1."""
+    """Sets the seed for reproducibility."""
     os.environ["PYTHONHASHSEED"] = str(seed)
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    # Deterministic behavior often slows down training significantly; 
+    # enable only if exact reproducibility is strictly required.
+    # os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8" 
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-
 def build_mlp_d(in_size, hidden_size, out_size, num_layers=1, lay_norm=True, use_sigmoid=False, use_softmax=False):
-    """
-    Args:
-        lay_norm (bool): If True, applies LayerNorm to all HIDDEN layers.
-        final_lay_norm (bool): If True, applies LayerNorm to the OUTPUT layer. 
-                               (Default False: usually better for physics/ResNets).
-    """
     if use_sigmoid and use_softmax:
         raise ValueError("Only one of use_sigmoid or use_softmax can be true.")
     
     layers = []
-    
     # --- 1. Input Block ---
     layers.append(nn.Linear(in_size, hidden_size))
     if lay_norm:
-        layers.append(nn.LayerNorm(hidden_size)) # Internal Norm
+        layers.append(nn.LayerNorm(hidden_size))
     layers.append(nn.ReLU())
     
     # --- 2. Intermediate Hidden Blocks ---
     for _ in range(num_layers - 1):
         layers.append(nn.Linear(hidden_size, hidden_size))
         if lay_norm:
-            layers.append(nn.LayerNorm(hidden_size)) # Internal Norm
+            layers.append(nn.LayerNorm(hidden_size))
         layers.append(nn.ReLU())
 
     # --- 3. Output Layer ---
@@ -51,64 +45,62 @@ def build_mlp_d(in_size, hidden_size, out_size, num_layers=1, lay_norm=True, use
 
     return nn.Sequential(*layers)
 
+def evaluate(test_loader, model, device):
+    """Evaluates 1-step loss."""
+    model.eval()
+    total_loss = 0.
+    total_graphs = 0
 
-def evaluate(test_loader, model, device, mode='test', plot=False, frequency=1, model_name='PIGNN', experiment_name='Val'):
     with torch.no_grad():
-        res = 0.
-        res_counter = 0
-
         for test_batch in test_loader:
-            for i in range(1):  # Iterates 10 times: 0 -> predicts 31, ..., 9 -> predicts 40
-                if i == 0:
-                    test_graph = test_batch.to(device)
-                    graph_t0 = test_graph
-                    # Clone to ensure ground truth remains unchanged
-                    end_pos = test_graph.end_pos.clone()  
+            test_batch = test_batch.to(device)
+            
+            # Forward pass
+            # Note: We don't need a loop here for single step evaluation
+            node_dv, node_dx = model(test_batch)
+            
+            new_pos = test_batch.pos + node_dx
+            
+            loss = F.mse_loss(new_pos, test_batch.end_pos)
+            
+            batch_num = test_batch.num_graphs
+            total_loss += loss.item() * batch_num
+            total_graphs += batch_num
 
-                node_dv,node_dx,_= model(graph_t0.detach())
-                new_vel =  graph_t0.vel + node_dv
-                new_pos =  graph_t0.pos + node_dx
-
-                graph_t0.prev_pos = graph_t0.pos.clone()
-                graph_t0.prev_vel = graph_t0.vel.clone()
-                graph_t0.pos = new_pos.clone()
-                graph_t0.vel = new_vel.clone()
-
-            loss = F.mse_loss(new_pos, end_pos)
-            batch_size = test_graph.num_graphs
-            res += loss.item() * batch_size
-            res_counter += batch_size
-
-        mean_pos_error = res / res_counter
-    return mean_pos_error
+    return total_loss / total_graphs if total_graphs > 0 else 0.0
 
 def evaluate_rollout(test_loader, model, device, nsteps=1):
+    """Evaluates multi-step rollout loss."""
     model.eval()
+    total_loss = 0.
+    total_graphs = 0
+
     with torch.no_grad():
-        res = 0.
-        res_counter = 0
-
         for test_batch in test_loader:
-            for i in range(nsteps):  # Iterates 10 times: 0 -> predicts 31, ..., 9 -> predicts 40
-                if i == 0:
-                    test_graph = test_batch.to(device)
-                    graph_t0 = test_graph
-                    # Clone to ensure ground truth remains unchanged
-                    end_pos = test_graph.end_pos.clone()  
+            graph_curr = test_batch.to(device)
+            # Store ground truth end position for the final step
+            end_pos_gt = graph_curr.end_pos 
+            
+            # Rollout
+            for _ in range(nsteps):
+                node_dv, node_dx= model(graph_curr)
+                
+                new_vel = graph_curr.vel + node_dv
+                new_pos = graph_curr.pos + node_dx
+                
+                # Update graph state for next step
+                graph_curr.prev_vel = graph_curr.vel # Usually model returns cleaned prev_vel or similar
+                graph_curr.vel = new_vel
+                graph_curr.pos = new_pos
+                # prev_pos update is implicit in logic usually, but strict physics requires:
+                # graph_curr.prev_pos = graph_curr.pos.clone() (before update)
 
-                node_dv,node_dx,vtm1= model(graph_t0.detach())
-                new_vel =  graph_t0.vel + node_dv
-                new_pos =  graph_t0.pos + node_dx
+            # Calculate loss against the ground truth of the *final* step
+            # Note: Ensure the dataset provides the correct end_pos for the n-th step
+            loss = F.mse_loss(new_pos, end_pos_gt)
+            
+            batch_num = graph_curr.num_graphs
+            total_loss += loss.item() * batch_num
+            total_graphs += batch_num
 
-                graph_t0.prev_pos = graph_t0.pos.clone()
-                graph_t0.prev_vel = vtm1.clone()
-                graph_t0.pos = new_pos.clone()
-                graph_t0.vel = new_vel.clone()
-
-            loss = F.mse_loss(new_pos, end_pos)
-            batch_size = test_graph.num_graphs
-            res += loss.item() * batch_size
-            res_counter += batch_size
-
-        mean_pos_error = res / res_counter
-    return mean_pos_error
+    return total_loss / total_graphs if total_graphs > 0 else 0.0
