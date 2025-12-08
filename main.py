@@ -9,7 +9,7 @@ from tqdm import tqdm
 from config import MODEL_SETTINGS, SEED, SAVED_MODELS_DIR, DEVICE_ID
 from utils import set_seed
 from dataset import HumanDataset, HumanDatasetSeq, create_dataloaders, calculate_min_max_edge, create_dataloaders_from_raw
-from model import DynamicsSolver
+from model_hist import DynamicsSolver
 from trainer import Trainer
 from visualization import visualize_multi_step 
 from utils import evaluate, evaluate_rollout
@@ -59,7 +59,7 @@ def main():
 
     # Model
     t_step = step_interval * MODEL_SETTINGS["time_step"] if MODEL_SETTINGS["finite_diff"] else step_interval * 1.0
-    model = DynamicsSolver(t_step, train_stats, num_jumps=1, num_msgs=5, latent_size=64).to(device) # num_msgs=4 from cell 22 output/code
+    model = DynamicsSolver(t_step, train_stats, num_jumps=1, num_msgs=5, latent_size=128).to(device) # num_msgs=4 from cell 22 output/code
     
     optimizer = optim.Adam(model.parameters(), lr=MODEL_SETTINGS["lr"])
     trainer = Trainer(model, optimizer, device, train_stats, step_interval, SAVED_MODELS_DIR)
