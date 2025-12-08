@@ -15,7 +15,7 @@ from visualization import visualize_multi_step
 from utils import evaluate, evaluate_rollout
 
 def find_best_model(model_dir):
-    pattern = os.path.join(model_dir, "GenLoss_*.pth")
+    pattern = os.path.join(model_dir, "Val_Loss_*.pth")
     files = glob.glob(pattern)
     if not files: return None
     def extract_loss(fn):

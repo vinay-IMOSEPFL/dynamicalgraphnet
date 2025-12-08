@@ -52,7 +52,7 @@ class RefFrameCalc(nn.Module):
 class NodeEncoder(nn.Module):
     def __init__(self, latent_size):
         super(NodeEncoder, self).__init__()
-        self.node_encoder = build_mlp_d(2, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
+        self.node_encoder = build_mlp_d(1, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
     
     def forward(self, node_scalar_feat):
         return self.node_encoder(node_scalar_feat)
@@ -62,13 +62,13 @@ class InteractionEncoder(nn.Module):
 
     def __init__(self, latent_size):
         super(InteractionEncoder, self).__init__()
-        self.edge_feat_encoder = build_mlp_d(9, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
+        self.edge_feat_encoder = build_mlp_d(15, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
         self.edge_encoder = build_mlp_d(2, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
         self.interaction_encoder = build_mlp_d(3*latent_size, latent_size, latent_size, num_layers=MODEL_SETTINGS['n_layers'], lay_norm=True)
 
     def forward(self, edge_index, edge_dx_, edge_attr, vector_a, vector_b, vector_c,
-                senders_v_t_, senders_v_tm1_, senders_w_t_,
-                receivers_v_t_, receivers_v_tm1_, receivers_w_t_,
+                senders_v_t_, senders_v_tm1_, senders_w_t_,senders_a_t_, senders_alpha_t_,
+                receivers_v_t_, receivers_v_tm1_, receivers_w_t_,receivers_a_t_, receivers_alpha_t_,
                 node_latent):
         
         senders, receivers = edge_index
@@ -96,16 +96,20 @@ class InteractionEncoder(nn.Module):
         s_vt_proj   = project(senders_v_t_)
         s_vtm1_proj = project(senders_v_tm1_)
         s_wt_proj   = project(senders_w_t_)
+        s_at_proj   = project(senders_a_t_)
+        s_alphat_proj   = project(senders_alpha_t_)
 
         # Project receivers (negated as per original code logic: -vector_a, etc.)
         # Note: Original code did v . (-a), v . (-b). This is equivalent to -(v . a).
         r_vt_proj   = -project(receivers_v_t_)
         r_vtm1_proj = -project(receivers_v_tm1_)
         r_wt_proj   = -project(receivers_w_t_)
+        r_at_proj   = -project(receivers_a_t_)
+        r_alphat_proj   = project(receivers_alpha_t_)
 
         # Concatenate features (9 features per node per edge)
-        senders_features = torch.cat([s_vt_proj, s_vtm1_proj, s_wt_proj], dim=1)
-        receivers_features = torch.cat([r_vt_proj, r_vtm1_proj, r_wt_proj], dim=1)
+        senders_features = torch.cat([s_vt_proj, s_vtm1_proj, s_wt_proj, s_at_proj, s_alphat_proj], dim=1)
+        receivers_features = torch.cat([r_vt_proj, r_vtm1_proj, r_wt_proj, r_at_proj, r_alphat_proj], dim=1)
         
         # Edge encodings
         edge_dx_norm = edge_dx_.norm(dim=1, keepdim=True)
@@ -231,15 +235,15 @@ class Interaction_Block(torch.nn.Module):
         self.layer_norm = nn.LayerNorm(latent_size)
 
     def forward(self, edge_index, senders_pos, receivers_pos, edge_dx_, edge_attr, vector_a, vector_b, vector_c, 
-                senders_v_t_, senders_v_tm1_, senders_w_t_,
-                receivers_v_t_, receivers_v_tm1_, receivers_w_t_,
+                senders_v_t_, senders_v_tm1_, senders_w_t_, senders_a_t_,senders_alpha_t_,
+                receivers_v_t_, receivers_v_tm1_, receivers_w_t_,receivers_a_t_, receivers_alpha_t_,
                 node_latent, residue=None, latent_history=False):
             
         interaction_latent = self.interaction_encoder(
             edge_index, edge_dx_, edge_attr,
             vector_a, vector_b, vector_c,
-            senders_v_t_, senders_v_tm1_, senders_w_t_,
-            receivers_v_t_, receivers_v_tm1_, receivers_w_t_,
+            senders_v_t_, senders_v_tm1_, senders_w_t_, senders_a_t_,senders_alpha_t_,
+            receivers_v_t_, receivers_v_tm1_, receivers_w_t_, receivers_a_t_, receivers_alpha_t_,
             node_latent
         )
 
@@ -300,14 +304,18 @@ class DynamicsSolver(torch.nn.Module):
         sum_node_dx = torch.zeros_like(vel)
         
         # Pre-compute Node Latent (static per step)
-        node_latent = self.node_encoder(torch.cat((node_type, vel.norm(dim=1, keepdim=True)), dim=1))
+        #node_latent = self.node_encoder(torch.cat((node_type, vel.norm(dim=1, keepdim=True)), dim=1))
         
         # Initialize iteration vars
         current_pos = pos
         current_edge_dx = current_pos[receivers] - current_pos[senders]
         
         # Residue state for RNN-like message passing
+        node_latent = self.node_encoder(node_type)
+        #node_latent = self.node_encoder(torch.hstack((node_type,vel.norm(dim=1,keepdim=True))))
         residue = None
+        node_dv = torch.zeros_like(vel)
+        node_dw = torch.zeros_like(vel)
 
         for i in range(self.num_messages):
             # Gather node attributes for edges
@@ -318,6 +326,10 @@ class DynamicsSolver(torch.nn.Module):
             r_vtm1 = node_v_tm1[receivers]
             s_wt = node_w_t[senders]
             r_wt = node_w_t[receivers]
+            s_at = node_dv[senders]
+            r_at = node_dv[receivers]
+            s_alphat = node_dw[senders]
+            r_alphat = node_dw[receivers]
 
             # Scaling
             s_vt_, s_vtm1_, r_vt_, r_vtm1_, edge_dx_ = self.scaler(
@@ -337,8 +349,8 @@ class DynamicsSolver(torch.nn.Module):
             node_dv, node_dw, residue = layer(
                 edge_index, current_pos[senders], current_pos[receivers],
                 edge_dx_, edge_attr, vec_a, vec_b, vec_c,
-                s_vt_, s_vtm1_, s_wt,
-                r_vt_, r_vtm1_, r_wt,
+                s_vt_, s_vtm1_, s_wt, s_at, s_alphat,
+                r_vt_, r_vtm1_, r_wt, r_at, r_alphat,
                 node_latent, residue=residue, latent_history=history_flag
             )
 

@@ -186,7 +186,7 @@ class HumanDataset(torch.utils.data.Dataset):
         
         # Set the node type of feet to one
         node_type = torch.ones(pos_t.shape[0],1)
-        #node_type[foot_nodes_indices] = 0
+        node_type[foot_nodes_indices] = 0
         # # Make reflected nodes of type 2
         # new_node_type = torch.vstack((node_type,2*torch.ones_like(reflected_nodes_indices).unsqueeze(1))) 
         
@@ -394,7 +394,7 @@ class HumanDatasetSeq(torch.utils.data.Dataset):
 
         # Get the foot node positions and indices
         foot_nodes_positions, foot_nodes_indices = self.get_foot_nodes(pos_t)
-        #foot_nodes_reflected, foot_distances = self.reflected_nodes(foot_nodes_positions,z0=0.0)
+        foot_nodes_reflected, foot_distances = self.reflected_nodes(foot_nodes_positions,z0=0.0)
         
         # current_largest_node_index = pos_t.shape[0]
         # reflected_nodes_indices = []
@@ -421,7 +421,7 @@ class HumanDatasetSeq(torch.utils.data.Dataset):
         
         # Set the node type of feet to one
         node_type = torch.ones(pos_t.shape[0],1)
-        #node_type[foot_nodes_indices] = 0
+        node_type[foot_nodes_indices] = 0
         # # Make reflected nodes of type 2
         # new_node_type = torch.vstack((node_type,2*torch.ones_like(reflected_nodes_indices).unsqueeze(1))) 
         
