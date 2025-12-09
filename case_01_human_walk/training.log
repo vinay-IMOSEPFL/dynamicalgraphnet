@@ -1,0 +1,25 @@
+2025-12-03 14:43:47,974 - INFO - Initializing training on cpu...
+2025-12-03 14:43:47,974 - INFO - Loading datasets...
+2025-12-03 14:43:51,471 - INFO - Computing normalization statistics...
+2025-12-03 14:44:10,232 - INFO - Initializing training on cpu...
+2025-12-03 14:44:10,232 - INFO - Loading datasets...
+2025-12-03 14:44:14,342 - INFO - Computing normalization statistics...
+2025-12-03 14:44:14,367 - INFO - Starting training loop...
+2025-12-03 14:44:21,065 - INFO - --> Saved new best model (Loss: 2.56535) at epoch 1
+2025-12-03 14:44:45,803 - INFO - --> Saved new best model (Loss: 2.37435) at epoch 5
+2025-12-03 14:45:16,515 - INFO - --> Saved new best model (Loss: 2.34704) at epoch 10
+2025-12-03 14:45:47,373 - INFO - --> Saved new best model (Loss: 1.82526) at epoch 15
+2025-12-03 14:46:48,791 - INFO - --> Saved new best model (Loss: 1.72999) at epoch 25
+2025-12-03 14:47:19,570 - INFO - --> Saved new best model (Loss: 1.17791) at epoch 30
+2025-12-03 14:47:50,217 - INFO - --> Saved new best model (Loss: 0.81991) at epoch 35
+2025-12-03 14:48:20,965 - INFO - --> Saved new best model (Loss: 0.72415) at epoch 40
+2025-12-03 14:48:51,644 - INFO - --> Saved new best model (Loss: 0.59384) at epoch 45
+2025-12-03 14:49:22,715 - INFO - --> Saved new best model (Loss: 0.56200) at epoch 50
+2025-12-03 14:49:53,076 - INFO - --> Saved new best model (Loss: 0.47689) at epoch 55
+2025-12-03 14:50:24,068 - INFO - --> Saved new best model (Loss: 0.45423) at epoch 60
+2025-12-03 14:51:25,492 - INFO - --> Saved new best model (Loss: 0.39947) at epoch 70
+2025-12-03 14:51:56,100 - INFO - --> Saved new best model (Loss: 0.35176) at epoch 75
+2025-12-03 14:52:27,499 - INFO - --> Saved new best model (Loss: 0.31522) at epoch 80
+2025-12-03 14:53:28,736 - INFO - --> Saved new best model (Loss: 0.29576) at epoch 90
+2025-12-03 14:53:59,839 - INFO - --> Saved new best model (Loss: 0.25701) at epoch 95
+2025-12-03 14:54:30,570 - INFO - Training Complete. Best Validation Loss: 0.25701 at Epoch 95
