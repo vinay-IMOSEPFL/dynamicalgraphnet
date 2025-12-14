@@ -60,7 +60,7 @@ def evaluate(test_loader, model, device):
             node_dv, node_dx = model(test_batch)
             
             new_pos = test_batch.pos + node_dx
-            
+
             loss = F.mse_loss(new_pos, test_batch.end_pos)
             
             batch_num = test_batch.num_graphs
@@ -79,8 +79,7 @@ def evaluate_rollout(test_loader, model, device, nsteps=1):
         for test_batch in test_loader:
             graph_curr = test_batch.to(device)
             # Store ground truth end position for the final step
-            end_pos_gt = graph_curr.end_pos 
-            
+            end_pos_gt = graph_curr.end_pos             
             # Rollout
             for _ in range(nsteps):
                 node_dv, node_dx= model(graph_curr)
@@ -89,7 +88,7 @@ def evaluate_rollout(test_loader, model, device, nsteps=1):
                 new_pos = graph_curr.pos + node_dx
                 
                 # Update graph state for next step
-                graph_curr.prev_vel = graph_curr.vel # Usually model returns cleaned prev_vel or similar
+                graph_curr.prev_vel = graph_curr.vel# Usually model returns cleaned prev_vel or similar
                 graph_curr.vel = new_vel
                 graph_curr.pos = new_pos
                 # prev_pos update is implicit in logic usually, but strict physics requires:

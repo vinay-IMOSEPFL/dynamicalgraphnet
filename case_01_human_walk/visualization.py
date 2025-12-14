@@ -105,47 +105,48 @@ def visualize_multi_step(
 
         # — rollout & per-step plotting —
         graph = data.clone().to(device)
-        for step in steps:
-            dv, dx = model(graph.detach())
-            graph.prev_vel = graph.vel
-            graph.vel      = graph.vel + dv
-            graph.pos      = graph.pos + dx
+        with torch.no_grad():
+            for step in steps:
+                dv, dx = model(graph.detach())
+                graph.prev_vel = graph.vel
+                graph.vel      = graph.vel + dv
+                graph.pos      = graph.pos + dx
 
-            pred31 = graph.pos[:31].detach().cpu().numpy()
-            gt_k   = gt_seq[step]
+                pred31 = graph.pos[:31].detach().cpu().numpy()
+                gt_k   = gt_seq[step]
 
-            fig = plt.figure(figsize=(6,6))
-            ax  = fig.add_subplot(111, projection='3d')
-            # optional ground plane: uncomment if desired
-            ax.plot_surface(xx, yy, np.zeros_like(xx), color='gray', alpha=0.2, linewidth=0)
+                fig = plt.figure(figsize=(6,6))
+                ax  = fig.add_subplot(111, projection='3d')
+                # optional ground plane: uncomment if desired
+                ax.plot_surface(xx, yy, np.zeros_like(xx), color='gray', alpha=0.2, linewidth=0)
 
-            ax.scatter(pred31[:,2], pred31[:,0], pred31[:,1],
-                       c='blue', s=30, edgecolors='k', alpha=0.5,
-                       label=f'Pred (step={step})')
-            ax.scatter(gt_k[:,2], gt_k[:,0], gt_k[:,1],
-                       c='red',  s=30, edgecolors='k', alpha=0.5,
-                       label=f'GT (step={step})')
-            for a,b in skeleton31:
-                ax.plot([pred31[a,2], pred31[b,2]],
-                        [pred31[a,0], pred31[b,0]],
-                        [pred31[a,1], pred31[b,1]],
-                        c='blue', alpha=0.6, linewidth=2)
-                ax.plot([gt_k[a,2], gt_k[b,2]],
-                        [gt_k[a,0], gt_k[b,0]],
-                        [gt_k[a,1], gt_k[b,1]],
-                        c='red', alpha=0.6, linestyle='-',linewidth=2)
-            step_mse = np.mean((pred31 - gt_k) ** 2)
+                ax.scatter(pred31[:,2], pred31[:,0], pred31[:,1],
+                        c='blue', s=30, edgecolors='k', alpha=0.5,
+                        label=f'Pred (step={step})')
+                ax.scatter(gt_k[:,2], gt_k[:,0], gt_k[:,1],
+                        c='red',  s=30, edgecolors='k', alpha=0.5,
+                        label=f'GT (step={step})')
+                for a,b in skeleton31:
+                    ax.plot([pred31[a,2], pred31[b,2]],
+                            [pred31[a,0], pred31[b,0]],
+                            [pred31[a,1], pred31[b,1]],
+                            c='blue', alpha=0.6, linewidth=2)
+                    ax.plot([gt_k[a,2], gt_k[b,2]],
+                            [gt_k[a,0], gt_k[b,0]],
+                            [gt_k[a,1], gt_k[b,1]],
+                            c='red', alpha=0.6, linestyle='-',linewidth=2)
+                step_mse = np.mean((pred31 - gt_k) ** 2)
 
-            ax.set_xlim(mid_x-20, mid_x+20)
-            ax.set_ylim(mid_y-20, mid_y+20)
-            ax.set_zlim(mid_z-20, mid_z+20)
-            ax.set_box_aspect((1,1,1))
-            ax.set_xlabel("X",fontsize = 16); ax.set_ylabel("Y",fontsize = 16); ax.set_zlabel("Z",fontsize = 16)
-            ax.set_title(f"Prediction vs GT — {step} steps; MSE={step_mse:.2e}",fontsize = 18)
-            ax.legend(loc='upper left',fontsize = 18)
-            plt.tight_layout()
-            plt.savefig(os.path.join(plot_dir, f'pred_vs_gt_step{step}.png'))
-            plt.close(fig)
+                ax.set_xlim(mid_x-20, mid_x+20)
+                ax.set_ylim(mid_y-20, mid_y+20)
+                ax.set_zlim(mid_z-20, mid_z+20)
+                ax.set_box_aspect((1,1,1))
+                ax.set_xlabel("X",fontsize = 16); ax.set_ylabel("Y",fontsize = 16); ax.set_zlabel("Z",fontsize = 16)
+                ax.set_title(f"Prediction vs GT — {step} steps; MSE={step_mse:.2e}",fontsize = 18)
+                ax.legend(loc='upper left',fontsize = 18)
+                plt.tight_layout()
+                plt.savefig(os.path.join(plot_dir, f'pred_vs_gt_step{step}.png'))
+                plt.close(fig)
 
         # optional: compute final MSE in absolute frame
         mask_cuda = (data.node_type[:31] != 2).squeeze()
@@ -181,5 +182,5 @@ def create_gif(save_dir):
         
         # Save as infinite-loop GIF
         gif_path = os.path.join(folder_path, 'rollout.gif')
-        imageio.mimsave(gif_path, images, fps=5, loop=0)
+        imageio.mimsave(gif_path, images, fps=2, loop=0)
         print(f"Created {gif_path} with {len(images)} frames")

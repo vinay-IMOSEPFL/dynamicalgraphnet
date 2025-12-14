@@ -4,6 +4,87 @@ import numpy as np
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 
+def augment_graph(graph):
+    """
+    Augments a single PyG Data object with a global node.
+    - Global Pos/Vel: Mean of existing nodes.
+    - Global Targets (y_): Mean of existing node targets.
+    - Node Type: -1
+    - Edge Type: -1
+    - Connectivity: Bidirectional (All nodes <-> Global Node)
+    """
+    # --- 1. Calculate Global Properties (Mean of current graph) ---
+    # Using dim=0 to average across all nodes in this single graph
+    
+    # Inputs
+    g_pos = graph.pos.mean(dim=0, keepdim=True)       # (1, 3)
+    g_vel = graph.vel.mean(dim=0, keepdim=True)       # (1, 3)
+    g_prev = graph.prev_vel.mean(dim=0, keepdim=True) # (1, 3)
+    g_type = torch.tensor([[-1.0]])                   # (1, 1)
+
+    # Targets (y_)
+    g_y_dv = graph.y_dv.mean(dim=0, keepdim=True)          # (1, 3)
+    g_y_dx = graph.y_dx.mean(dim=0, keepdim=True)          # (1, 3)
+    g_end_pos = graph.end_pos.mean(dim=0, keepdim=True)    # (1, 3)
+    g_end_vel = graph.end_vel.mean(dim=0, keepdim=True)    # (1, 3)
+
+    # --- 2. Append Global Node to Attributes ---
+    
+    # Inputs
+    graph.pos = torch.cat([graph.pos, g_pos], dim=0)
+    graph.vel = torch.cat([graph.vel, g_vel], dim=0)
+    graph.prev_vel = torch.cat([graph.prev_vel, g_prev], dim=0)
+    graph.node_type = torch.cat([graph.node_type, g_type], dim=0)
+    
+    # Targets
+    graph.y_dv = torch.cat([graph.y_dv, g_y_dv], dim=0)
+    graph.y_dx = torch.cat([graph.y_dx, g_y_dx], dim=0)
+    graph.end_pos = torch.cat([graph.end_pos, g_end_pos], dim=0)
+    graph.end_vel = torch.cat([graph.end_vel, g_end_vel], dim=0)
+
+    # Handle Ground Truth Sequence (gt_seq) if it exists
+    # gt_seq is typically a list of (N, 3) arrays/tensors
+    if hasattr(graph, 'gt_seq') and graph.gt_seq is not None:
+        new_gt_seq = []
+        for step_data in graph.gt_seq:
+            # Check if it's numpy or torch
+            if isinstance(step_data, torch.Tensor):
+                g_step = step_data.mean(dim=0, keepdim=True)
+                step_data = torch.cat([step_data, g_step], dim=0)
+            else: # assume numpy
+                g_step = np.mean(step_data, axis=0, keepdims=True)
+                step_data = np.concatenate([step_data, g_step], axis=0)
+            new_gt_seq.append(step_data)
+        graph.gt_seq = new_gt_seq
+
+    # --- 3. Create New Edges ---
+    num_original_nodes = graph.num_nodes - 1 # We just added 1
+    
+    # Indices: 0 to N-1 are original, N is global
+    original_indices = torch.arange(num_original_nodes, dtype=torch.long)
+    global_idx = torch.full((num_original_nodes,), num_original_nodes, dtype=torch.long)
+    
+    # Edges: Original -> Global
+    src1, dst1 = original_indices, global_idx
+    # Edges: Global -> Original
+    src2, dst2 = global_idx, original_indices
+    
+    new_src = torch.cat([src1, src2])
+    new_dst = torch.cat([dst1, dst2])
+    new_edges = torch.stack([new_src, new_dst], dim=0)
+    
+    # Append to Edge Index
+    graph.edge_index = torch.cat([graph.edge_index, new_edges], dim=1)
+    
+    # --- 4. Create New Edge Attributes (Type -1) ---
+    # Detect existing feature dimension (usually 1 based on your code)
+    feat_dim = graph.edge_attr.shape[1] 
+    new_attr = torch.full((new_edges.shape[1], feat_dim), -1.0)
+    
+    graph.edge_attr = torch.cat([graph.edge_attr, new_attr], dim=0)
+    
+    return graph
+
 
 class MDAnalysisDataset(Dataset):
     """
@@ -28,7 +109,7 @@ class MDAnalysisDataset(Dataset):
         self.delta_frame = delta_frame
         self.delta_total = nsteps*self.delta_frame
         self.nsteps = nsteps
-        self.p = 1
+        self.time_step = 1
         self.dataset = dataset_name
         self.partition = partition
         self.test_rot = test_rot
@@ -51,13 +132,13 @@ class MDAnalysisDataset(Dataset):
         self.edges = torch.stack(edges_list, dim=0)
 
         # 2) Precompute split-indices over usable frames
-        usable = self.n_frames - self.delta_total-self.p
+        usable = self.n_frames - self.delta_total-self.time_step
         n_train = int(self.train_valid_test_ratio[0] * usable)
         n_valid = int(self.train_valid_test_ratio[1] * usable)
         n_test  = usable - n_train - n_valid
-        self.train_start = self.p
-        self.valid_start = self.p + n_train
-        self.test_start  = self.p + n_train + n_valid
+        self.train_start = self.time_step
+        self.valid_start = self.time_step + n_train
+        self.test_start  = self.time_step + n_train + n_valid
 
         self.n_train = n_train
         self.n_valid = n_valid
@@ -83,8 +164,8 @@ class MDAnalysisDataset(Dataset):
         else:
             frame_0 = self.test_start + i
         
-        frame_tm1 = frame_0 - self.p
-        frame_tp1 = frame_0 + self.p
+        frame_tm1 = frame_0 - self.time_step
+        frame_tp1 = frame_0 + self.time_step
         frame_end = frame_0 + self.delta_total
 
         # Load raw loc and vel from cached files

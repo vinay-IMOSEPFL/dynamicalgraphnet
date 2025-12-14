@@ -6,6 +6,7 @@ import torch
 import torch.optim as optim
 from tqdm import tqdm
 from torch_geometric.loader import DataLoader
+import random
 
 
 from case_02_protein.config import MODEL_SETTINGS, SEED, SAVED_MODELS_DIR, DEVICE_ID
@@ -13,6 +14,7 @@ from utils.utils import set_seed, evaluate, evaluate_rollout
 from case_02_protein.dataset import MDAnalysisDataset, calculate_min_max_edge
 from model.model_hist import DynamicsSolver
 from utils.trainer import Trainer
+from case_02_protein.visualization import backbone_to_pdb_file,evaluate_rollout_vis
 #from case_01_human_walk.visualization import visualize_multi_step, create_gif
 
 def find_best_model(model_dir):
@@ -31,7 +33,7 @@ def train_one_epoch(trainer, loader, pbar_desc="", smooth=0.98):
 
     Parameters
     ----------
-    trainer : your Trainer object
+    trainer : Trainer object
     loader  : DataLoader
     pbar_desc : str                     – label for the progress bar
     smooth     : float in (0,1)         – exponential smoothing for running-avg
@@ -92,7 +94,15 @@ def main():
     t_step = step_interval * MODEL_SETTINGS["time_step"] if MODEL_SETTINGS["finite_diff"] else step_interval * 1.0
     node_in_f = 5
     edge_in_f = 1
-    model = DynamicsSolver(node_in_f, edge_in_f, t_step, train_stats, num_msgs=5, latent_size=128, mlp_layers=MODEL_SETTINGS["n_layers"]).to(device) # num_msgs=4 from cell 22 output/code
+    model = DynamicsSolver(
+        node_in_f, 
+        edge_in_f, 
+        t_step, 
+        train_stats, 
+        num_msgs=5, 
+        latent_size=MODEL_SETTINGS["nf"], 
+        mlp_layers=MODEL_SETTINGS["n_layers"]
+        ).to(device) # num_msgs=4 from cell 22 output/code
     
     optimizer = optim.Adam(model.parameters(), lr=MODEL_SETTINGS["lr"])
     trainer = Trainer(model, optimizer, device, train_stats, step_interval, SAVED_MODELS_DIR)
@@ -102,11 +112,11 @@ def main():
         with tqdm(range(1, MODEL_SETTINGS["epochs"]+1)) as pbar:
             for epoch in pbar:
 
-                avg_train = train_one_epoch(trainer, train_loader,pbar_desc=f"Epoch {epoch}/{MODEL_SETTINGS['epochs']}")
+                #avg_train = train_one_epoch(trainer, train_loader,pbar_desc=f"Epoch {epoch}/{MODEL_SETTINGS['epochs']}")
                 for batch in train_loader:
                     trainer.train(batch)
                 
-                # Validation every 5 epochs as per notebook cell 54
+                # Validation every 1 epochs as per notebook cell 54
                 if epoch % 1 == 0:
                     trainer.test(val_loader, mode='val', epoch=epoch)
                     trainer.test(test_loader, mode='test')
@@ -125,9 +135,10 @@ def main():
 
         for nstep in [1,2,3,4]:
             
-            dataset_eval = HumanDataset(partition='test', max_samples=MODEL_SETTINGS["max_testing_samples"], data_dir=MODEL_SETTINGS["data_dir"],nsteps=nstep)
+            dataset_eval = MDAnalysisDataset('adk', partition='test', tmp_dir=MODEL_SETTINGS["data_dir"],
+                                      delta_frame=15, load_cached=True, nsteps=nstep)
             
-            dataloader_eval = create_dataloaders_from_raw(dataset_eval,200,shuffle=False)
+            dataloader_eval = DataLoader(dataset_eval, batch_size=64, shuffle=False)  
             
             eval_error = evaluate_rollout(dataloader_eval, trainer.model, device, nsteps=nstep)
             
@@ -141,7 +152,11 @@ def main():
         print(f"Loading {best_path}...")
         model.load_state_dict(torch.load(best_path, map_location=device))
         print('\n EVALUATING...')
-        dataset_eval = HumanDatasetSeq(partition='test', max_samples=MODEL_SETTINGS["max_testing_samples"], data_dir=MODEL_SETTINGS["data_dir"],nsteps=4)
+        dataset_eval = MDAnalysisDataset('adk', partition='test', tmp_dir=MODEL_SETTINGS["data_dir"],
+                                      delta_frame=15, load_cached=True, nsteps=4)
+        indices = random.sample(range(len(dataset_eval)), 5)
+        random_graphs = [dataset_eval[i] for i in indices]
+        print(f"Selected indices: {indices}")
         loader = create_dataloaders_from_raw(dataset_eval,200,shuffle=False)
         visualize_multi_step(
                             loader,

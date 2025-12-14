@@ -5,10 +5,11 @@ import re
 import torch
 import torch.optim as optim
 from tqdm import tqdm
+import shutil
 
 from case_01_human_walk.config import MODEL_SETTINGS, SEED, SAVED_MODELS_DIR, DEVICE_ID
 from utils.utils import set_seed, evaluate, evaluate_rollout
-from case_01_human_walk.dataset import HumanDataset, HumanDatasetSeq, create_dataloaders, calculate_min_max_edge, create_dataloaders_from_raw
+from case_01_human_walk.dataset import HumanDatasetSeq, create_dataloaders, calculate_min_max_edge, create_dataloaders_from_raw
 from model.model_hist import DynamicsSolver
 from utils.trainer import Trainer
 from case_01_human_walk.visualization import visualize_multi_step, create_gif
@@ -18,7 +19,7 @@ def find_best_model(model_dir):
     files = glob.glob(pattern)
     if not files: return None
     def extract_loss(fn):
-        m = re.search(r'GenLoss_([\d\.]+)mm', fn)
+        m = re.search(r'Val_Loss_([\d\.]+)mm', fn)
         return float(m.group(1)) if m else float('inf')
     return min(files, key=extract_loss)
 
@@ -26,6 +27,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test', 'visual'])
     args = parser.parse_args()
+    augment= True
 
     os.environ["CUDA_VISIBLE_DEVICES"] = DEVICE_ID
     set_seed(SEED)
@@ -33,16 +35,16 @@ def main():
     print(f"Device: {device} | Mode: {args.mode}")
 
     # Data Setup
-    ds_train = HumanDataset('train', 
+    ds_train = HumanDatasetSeq('train', 
                             max_samples=MODEL_SETTINGS["max_training_samples"], 
-                            data_dir=MODEL_SETTINGS["data_dir"], nsteps=1)
-    ds_val = HumanDataset('val', 
+                            data_dir=MODEL_SETTINGS["data_dir"], nsteps=1,augment=augment)
+    ds_val = HumanDatasetSeq('val', 
                           max_samples=MODEL_SETTINGS["max_testing_samples"], 
-                          data_dir=MODEL_SETTINGS["data_dir"], nsteps=1)
+                          data_dir=MODEL_SETTINGS["data_dir"], nsteps=1,augment=augment)
     # Test dataset for metrics
-    ds_test = HumanDataset('test', 
+    ds_test = HumanDatasetSeq('test', 
                            max_samples=MODEL_SETTINGS["max_testing_samples"], 
-                           data_dir=MODEL_SETTINGS["data_dir"], nsteps=1)
+                           data_dir=MODEL_SETTINGS["data_dir"], nsteps=1,augment=augment)
 
     train_loader = create_dataloaders(ds_train, MODEL_SETTINGS["batch_size"])
     val_loader = create_dataloaders(ds_val, MODEL_SETTINGS["batch_size"], shuffle=False)
@@ -54,7 +56,7 @@ def main():
         return (stat[0].to(device), stat[1].to(device)) if isinstance(stat, tuple) else stat.to(device)
     train_stats = tuple(to_dev(s) for s in raw_stats)
 
-    step_interval = 30
+    step_interval = MODEL_SETTINGS["step_interval"]
 
     # Model
     t_step = step_interval * MODEL_SETTINGS["time_step"] if MODEL_SETTINGS["finite_diff"] else step_interval * 1.0
@@ -62,13 +64,27 @@ def main():
     node_in_f = 1
     edge_in_f = 1
 
-    model = DynamicsSolver(node_in_f, edge_in_f, t_step, train_stats, num_msgs=5, latent_size=128, mlp_layers=MODEL_SETTINGS["n_layers"]).to(device) 
+    model = DynamicsSolver(
+        node_in_f, edge_in_f, 
+        t_step, 
+        train_stats, 
+        num_msgs=5, 
+        latent_size=MODEL_SETTINGS["nf"], 
+        mlp_layers=MODEL_SETTINGS["n_layers"]
+        ).to(device) 
     
     optimizer = optim.Adam(model.parameters(), lr=MODEL_SETTINGS["lr"])
     trainer = Trainer(model, optimizer, device, train_stats, step_interval, SAVED_MODELS_DIR)
 
     if args.mode == 'train':
         print(f"Training for {MODEL_SETTINGS['epochs']} epochs...")
+
+        # ---- CLEAR CHECKPOINT FOLDER ONCE PER TRAIN RUN ----
+        if os.path.exists(trainer.model_dir):
+            shutil.rmtree(trainer.model_dir)
+        os.makedirs(trainer.model_dir, exist_ok=True)
+        # ---------------------------------------------------
+
         with tqdm(range(1, MODEL_SETTINGS["epochs"]+1)) as pbar:
             for epoch in pbar:
                 for batch in train_loader:
@@ -93,7 +109,10 @@ def main():
 
         for nstep in [1,2,3,4]:
             
-            dataset_eval = HumanDataset(partition='test', max_samples=MODEL_SETTINGS["max_testing_samples"], data_dir=MODEL_SETTINGS["data_dir"],nsteps=nstep)
+            dataset_eval = HumanDatasetSeq(
+                partition='test', 
+                max_samples=MODEL_SETTINGS["max_testing_samples"], 
+                data_dir=MODEL_SETTINGS["data_dir"],nsteps=nstep,augment=augment)
             
             dataloader_eval = create_dataloaders_from_raw(dataset_eval,200,shuffle=False)
             
@@ -109,7 +128,11 @@ def main():
         print(f"Loading {best_path}...")
         model.load_state_dict(torch.load(best_path, map_location=device))
         print('\n EVALUATING...')
-        dataset_eval = HumanDatasetSeq(partition='test', max_samples=MODEL_SETTINGS["max_testing_samples"], data_dir=MODEL_SETTINGS["data_dir"],nsteps=4)
+        dataset_eval = HumanDatasetSeq(
+            partition='test', 
+            max_samples=MODEL_SETTINGS["max_testing_samples"], 
+            data_dir=MODEL_SETTINGS["data_dir"],
+            nsteps=4, augment= True)
         loader = create_dataloaders_from_raw(dataset_eval,200,shuffle=False)
         visualize_multi_step(
                             loader,
