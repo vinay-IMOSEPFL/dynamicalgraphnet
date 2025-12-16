@@ -9,10 +9,12 @@ def augment_graph(graph):
     Augments a single PyG Data object with a global node.
     - Global Pos/Vel: Mean of existing nodes.
     - Global Targets (y_): Mean of existing node targets.
-    - Node Type: -1
-    - Edge Type: -1
+    - Node Type: Adds new class (One-Hot).
+    - Edge Type: Adds new class (One-Hot).
     - Connectivity: Bidirectional (All nodes <-> Global Node)
     """
+    device = graph.pos.device # Ensure we use the correct device
+
     # --- 1. Calculate Global Properties (Mean of current graph) ---
     # Using dim=0 to average across all nodes in this single graph
     
@@ -20,7 +22,20 @@ def augment_graph(graph):
     g_pos = graph.pos.mean(dim=0, keepdim=True)       # (1, 3)
     g_vel = graph.vel.mean(dim=0, keepdim=True)       # (1, 3)
     g_prev = graph.prev_vel.mean(dim=0, keepdim=True) # (1, 3)
-    g_type = torch.tensor([[-1.0]])                   # (1, 1)
+
+    # DO: Handle node features if they exist (Average)
+    if hasattr(graph, 'node_feat') and graph.node_feat is not None:
+        g_node_feat = graph.node_feat.mean(dim=0, keepdim=True)
+
+    
+    # DO: Add new class for Node Type (One-Hot Expansion)
+    # Expand existing (N, C) -> (N, C+1) by padding with 0
+    existing_node_types = torch.nn.functional.pad(graph.node_type, (0, 1), value=0.0)
+    
+    # Create Global Type: [0, ..., 0, 1] (New Class)
+    g_type = torch.zeros((1, existing_node_types.shape[1]), device=device)
+    g_type[0, -1] = 1.0
+
 
     # Targets (y_)
     g_y_dv = graph.y_dv.mean(dim=0, keepdim=True)          # (1, 3)
@@ -34,7 +49,12 @@ def augment_graph(graph):
     graph.pos = torch.cat([graph.pos, g_pos], dim=0)
     graph.vel = torch.cat([graph.vel, g_vel], dim=0)
     graph.prev_vel = torch.cat([graph.prev_vel, g_prev], dim=0)
-    graph.node_type = torch.cat([graph.node_type, g_type], dim=0)
+    
+    # Updated: Use the expanded versions
+    graph.node_type = torch.cat([existing_node_types, g_type], dim=0)
+    
+    if hasattr(graph, 'node_feat') and graph.node_feat is not None:
+        graph.node_feat = torch.cat([graph.node_feat, g_node_feat], dim=0)
     
     # Targets
     graph.y_dv = torch.cat([graph.y_dv, g_y_dv], dim=0)
@@ -102,7 +122,8 @@ class MDAnalysisDataset(Dataset):
         test_rot: bool = False,
         test_trans: bool = False,
         load_cached: bool = True,
-        nsteps=1
+        nsteps=1,
+        augment=False
     ):
         super().__init__()
         assert load_cached, "This version only supports load_cached=True"
@@ -118,6 +139,7 @@ class MDAnalysisDataset(Dataset):
         # Adjust tmp_dir to point at cached folder
         tmp_dir = os.path.join(tmp_dir, 'adk_backbone_processed')
         self.tmp_dir = tmp_dir
+        self.augment = augment
 
         # Default split ratio if not provided
         if train_valid_test_ratio is None:
@@ -132,13 +154,13 @@ class MDAnalysisDataset(Dataset):
         self.edges = torch.stack(edges_list, dim=0)
 
         # 2) Precompute split-indices over usable frames
-        usable = self.n_frames - self.delta_total-self.time_step
+        usable = self.n_frames - self.delta_total-self.delta_frame
         n_train = int(self.train_valid_test_ratio[0] * usable)
         n_valid = int(self.train_valid_test_ratio[1] * usable)
         n_test  = usable - n_train - n_valid
-        self.train_start = self.time_step
-        self.valid_start = self.time_step + n_train
-        self.test_start  = self.time_step + n_train + n_valid
+        self.train_start = self.delta_frame
+        self.valid_start = self.delta_frame + n_train
+        self.test_start  = self.delta_frame + n_train + n_valid
 
         self.n_train = n_train
         self.n_valid = n_valid
@@ -164,69 +186,41 @@ class MDAnalysisDataset(Dataset):
         else:
             frame_0 = self.test_start + i
         
-        frame_tm1 = frame_0 - self.time_step
-        frame_tp1 = frame_0 + self.time_step
+        frame_tm1 = frame_0 - self.delta_frame
         frame_end = frame_0 + self.delta_total
 
         # Load raw loc and vel from cached files
-        loc_0, vel_0, edge_global, edge_global_attr = torch.load(
+        loc_0, vel_0 = torch.load(
             os.path.join(self.tmp_dir, f'{self.dataset}_{frame_0}.pkl')
         )
-        loc_tp, vel_tp, _, _ = torch.load(
-            os.path.join(self.tmp_dir, f'{self.dataset}_{frame_tp1}.pkl')
-        )
-        loc_end, vel_end, _, _ = torch.load(
+        loc_end, vel_end = torch.load(
             os.path.join(self.tmp_dir, f'{self.dataset}_{frame_end}.pkl')
         )
-        loc_tm, vel_tm, _, _ = torch.load(
+        loc_tm, vel_tm = torch.load(
             os.path.join(self.tmp_dir, f'{self.dataset}_{frame_tm1}.pkl')
         )
 
         seq = []
         for step in range(self.nsteps + 1):
             idx = frame_0 + step * self.delta_frame
-            loc_seq, _, _, _ = torch.load(
+            loc_seq, _,= torch.load(
             os.path.join(self.tmp_dir, f'{self.dataset}_{idx}.pkl')
         )
             seq.append(loc_seq)
 
-        # Stack global edges
-        edge_global = torch.stack(edge_global, dim=0)
-        if edge_global_attr.dim() == 1:
-            edge_global_attr = edge_global_attr.unsqueeze(-1)
 
-        # Combine local and global edges
-        edge_index_combined = torch.cat([self.edges, edge_global], dim=1)
+        node_charges = self.node_feat[:,-1:]
+        node_type = self.node_feat[:,:-1]
 
-        # Build combined edge_attr = [distance, type_flag]
-        ea = self.edge_attr
-        if ea.dim() == 1:
-            ea = ea.unsqueeze(-1)
-        E_l = ea.size(0)
-        E_g = edge_global_attr.size(0)
-
-        dist_combined = torch.vstack((ea, edge_global_attr))
-        zero_block = torch.zeros(E_l, 1)
-        one_block  = torch.ones(E_g,  1)
-        type_flag  = torch.vstack((zero_block, one_block))
-
-        senders,receivers = edge_index_combined
-
-        charges = self.node_feat[:,1:2]
-
-        charges_ij = (charges[senders]*charges[receivers]).view(-1,1)
-
-
-        edge_attr_combined = type_flag#torch.hstack((type_flag, charges_ij))
-
-
+        edge_attr = torch.zeros_like(self.edge_attr).view(-1,1)
 
         # Build PyG Data object
         graph = Data(
-            edge_index=edge_index_combined,
-            edge_attr=edge_attr_combined,
+            edge_index=self.edges,
+            edge_attr=edge_attr,
         )
-        graph.node_type = self.node_feat
+        graph.node_feat = node_charges
+        graph.node_type = node_type
         graph.pos     = loc_0
         graph.vel     = vel_0
         graph.prev_vel  = vel_tm
@@ -235,7 +229,12 @@ class MDAnalysisDataset(Dataset):
         graph.end_pos   = loc_end
         graph.end_vel   = vel_end
         graph.seq     = seq
-        return graph
+
+        if self.augment:
+            graph = augment_graph(graph)
+        # --------------------------------             
+        
+        return graph   
 
 
 def calculate_min_max_edge(train_loader):
@@ -274,7 +273,6 @@ def calculate_min_max_edge(train_loader):
         node_vel_tm1 = batched_graph.prev_vel.float()
         
         # Calculate displacements and acceleration changes
-        mask_body = (batched_graph.node_type!=2).squeeze()
         node_dv = (batched_graph.y_dv).float()
         node_dx = (batched_graph.y_dx).float()
         

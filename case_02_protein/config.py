@@ -8,7 +8,7 @@ RESULTS_DIR = os.path.join(BASE_DIR, "case_02_protein", "results")
 
 # Settings derived from the notebook
 MODEL_SETTINGS ={
-        "batch_size": 8,
+        "batch_size": 16,
         "epochs": 600,
         "lr": 5e-4,
         "nf": 64,

@@ -1,3 +1,18 @@
+
+from tqdm import tqdm
+import os
+
+import numpy as np
+import torch
+
+from scipy.sparse import coo_matrix
+
+import MDAnalysis
+from MDAnalysis.analysis import distances
+from MDAnalysisData import datasets
+
+from sklearn.preprocessing import OneHotEncoder
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3) Main preprocessing
 # ─────────────────────────────────────────────────────────────────────────────
@@ -6,7 +21,6 @@ tmp_dir     = 'mdanalysis/dataset/'
 top_file    = None      
 traj_file   = None     
 backbone    = True
-cut_off     = 0.0
 is_save     = True
 use_sg      = False    # True → SG+FD (data smoothening + central differencing); False → plain FD on raw data
 
@@ -108,28 +122,9 @@ if is_save:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3.6) Compute global edges only for the selected frames, using simple loop
-# ─────────────────────────────────────────────────────────────────────────────
-num_core_frames = len(loc)
-edges_global = [None] * num_core_frames
-edges_global_attr = [None] * num_core_frames
-
-for i in tqdm(range(num_core_frames), desc=f"Computing global edges"):
-    positions = loc[i].numpy()  # [N,3]
-    cm = distances.contact_matrix(positions, cutoff=cut_off, returntype="sparse")
-    cm = coo_matrix(cm)
-    cm.setdiag(False)
-    cm.eliminate_zeros()
-
-    rows = torch.tensor(cm.row, dtype=torch.long)
-    cols = torch.tensor(cm.col, dtype=torch.long)
-    edges_global[i] = [rows, cols]
-
-    diffs = positions[cm.row] - positions[cm.col]
-    edges_global_attr[i] = torch.norm(torch.from_numpy(diffs), p=2, dim=1)
-# ─────────────────────────────────────────────────────────────────────────────
 # 3.7) Save per-frame data (loc, vel, global) for each core frame
 # ─────────────────────────────────────────────────────────────────────────────
+num_core_frames = len(loc)
 if backbone:
     out_dir = os.path.join(tmp_dir, 'adk_backbone_processed')
 else:
@@ -142,8 +137,6 @@ if is_save:
                 (
                     loc[i],                  # [N,3]
                     vel[i],                  # [N,3]
-                    edges_global[i],         # [2, E_i]
-                    edges_global_attr[i]     # [E_i]
                 ),
                 os.path.join(out_dir, f'adk_{i}.pkl')
             )

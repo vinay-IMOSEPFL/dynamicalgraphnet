@@ -149,10 +149,10 @@ def visualize_multi_step(
                 plt.close(fig)
 
         # optional: compute final MSE in absolute frame
-        mask_cuda = (data.node_type[:31] != 2).squeeze()
-        mask_cpu  = mask_cuda.cpu().numpy()
-        final_pred = graph.pos[:31][mask_cuda]
-        final_gt_np = gt_seq[steps[-1]][mask_cpu]
+        #mask_cuda = (data.node_type[:31] != 2).squeeze()
+        #mask_cpu  = mask_cuda.cpu().numpy()
+        final_pred = graph.pos[:31]#[mask_cuda]
+        final_gt_np = gt_seq[steps[-1]]#[mask_cpu]
         final_gt    = torch.from_numpy(final_gt_np).to(device)
         mse = F.mse_loss(final_pred, final_gt).item()
         print(f"Graph {idx}, final step={steps[-1]}, MSE={mse:.4e}")
@@ -182,5 +182,5 @@ def create_gif(save_dir):
         
         # Save as infinite-loop GIF
         gif_path = os.path.join(folder_path, 'rollout.gif')
-        imageio.mimsave(gif_path, images, fps=2, loop=0)
+        imageio.mimsave(gif_path, images, fps=3, loop=0)
         print(f"Created {gif_path} with {len(images)} frames")

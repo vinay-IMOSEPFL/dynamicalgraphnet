@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from utils.utils import build_mlp_d
+from torch_scatter import scatter_mean 
 
 class RefFrameCalc(nn.Module):
     def __init__(self):
@@ -183,9 +184,7 @@ class InteractionDecoder(torch.nn.Module):
         
         return fij, tauij, dxij
 
-import torch
-import torch.nn as nn
-from torch_scatter import scatter_mean 
+
 
 class Node_Internal_Dv_Decoder(torch.nn.Module):
     def __init__(self, latent_size=128, mlp_layers=2):
@@ -193,8 +192,8 @@ class Node_Internal_Dv_Decoder(torch.nn.Module):
         
         self.inv_mass_decoder = build_mlp_d(latent_size, latent_size, 1, num_layers=mlp_layers, lay_norm=False)
         self.inv_inertia_decoder = build_mlp_d(latent_size, latent_size, 1, num_layers=mlp_layers, lay_norm=False)
-        self.external_force_decoder = build_mlp_d(latent_size, latent_size, 3, num_layers=mlp_layers, lay_norm=False)
-        #self.blend_weight_decoder = build_mlp_d(latent_size, latent_size, 2, num_layers=mlp_layers, lay_norm=False)
+        self.external_dv_decoder = build_mlp_d(latent_size, latent_size, 3, num_layers=mlp_layers, lay_norm=False)
+        self.velocity_scaler = build_mlp_d(latent_size, latent_size, 1, num_layers=mlp_layers, lay_norm=False)
 
     def forward(self, edge_index, node_latent, current_velocity, edge_forces, edge_torques, edge_constraints):
         """
@@ -225,19 +224,21 @@ class Node_Internal_Dv_Decoder(torch.nn.Module):
         net_static_correction = scatter_mean(edge_constraints, receivers, dim=0, dim_size=num_nodes)
 
         # 4. Compute Dynamic Updates
-        delta_velocity = inverse_mass * net_force + self.external_force_decoder(node_latent)
+        delta_velocity_int = inverse_mass * net_force 
+        delta_velocity_ext = self.external_dv_decoder(node_latent)
+        delta_velocity = delta_velocity_int #+ delta_velocity_ext
         delta_angular_velocity = inverse_inertia * net_torque
 
         # 5. Mix and Match Position Update
         static_displacement = net_static_correction
         
-        next_velocity = current_velocity + delta_velocity
-        dynamic_displacement = current_velocity#(current_velocity + next_velocity) * 0.5
+        dispacement = (
+            (current_velocity + delta_velocity_ext)*self.velocity_scaler(node_latent) + 
+            static_displacement
+            )
 
-        delta_position = dynamic_displacement + static_displacement#(blend_weights[:, 0:1] * static_displacement) + \
-                         #(blend_weights[:, 1:2] * dynamic_displacement)
 
-        return delta_velocity, delta_angular_velocity, delta_position
+        return delta_velocity, delta_angular_velocity, dispacement
 
 class Scaler(torch.nn.Module):
     def __init__(self):
@@ -291,7 +292,6 @@ class Interaction_Block(torch.nn.Module):
         # Residual connection
         if latent_history and residue is not None:
             interaction_latent = self.layer_norm(interaction_latent + residue)
-            #interaction_latent = self.layer_norm(interaction_latent)
         
         # Decode forces and torques
         edge_force, edge_tau, edge_corr = self.interaction_decoder(
@@ -326,14 +326,12 @@ class DynamicsSolver(torch.nn.Module):
         prev_vel = graph.prev_vel.float()
         edge_attr = graph.edge_attr.float()
         node_type = graph.node_type.float()
-        node_feat = getattr(graph, 'node_feat', node_type)
         edge_index = graph.edge_index.long()
         senders, receivers = edge_index
 
         # Mask for nodes that are NOT reflected (type != 2)
         # Using a boolean mask is faster for indexing
-        mask_body = (graph.node_type != 2).squeeze()
-        mask_local = (graph.node_type !=-1).squeeze()
+        mask_body = (graph.node_type[:,-1:] != -100).squeeze()
 
         # Initial State
         node_v_t = vel
@@ -347,8 +345,11 @@ class DynamicsSolver(torch.nn.Module):
         sum_node_dx = torch.zeros_like(vel)
         
         # Pre-compute Node Latent (static per step)
-        node_latent = self.node_encoder(node_type)#torch.cat((node_type, vel.norm(dim=1, keepdim=True)), dim=1))
-        
+        if hasattr(graph, 'node_feat') and graph.node_feat is not None:
+            node_latent = self.node_encoder(torch.hstack((graph.node_feat,node_type)))#torch.cat((node_type, vel.norm(dim=1, keepdim=True)), dim=1))
+        else:
+            node_latent = self.node_encoder(node_type)
+
         # Initialize iteration vars
         current_pos = pos
         current_edge_dx = current_pos[receivers] - current_pos[senders]
@@ -389,15 +390,7 @@ class DynamicsSolver(torch.nn.Module):
                 node_latent, node_v_t,residue=past_edge_latent, latent_history=history_flag
             )
 
-            # Integration (Symplectic Euler-ish)
-            # Update accumulators and states for body nodes only
-            
-            # Apply updates
-            # Note: We can add directly to the tensors. 
-            # Using masked scatter/add is efficient.
-            
-            # Update Accumulators (Total Change)
-            sum_node_dv[mask_body] += node_dv[mask_body]
+            sum_node_dv += node_dv[mask_body]
             
             # Update Velocity
             node_vf = node_v_t.clone()
@@ -408,8 +401,7 @@ class DynamicsSolver(torch.nn.Module):
             node_wf[mask_body] += node_dw[mask_body]
 
             # Calculate Displacement for this sub-step
-            # dx = (v_new + v_old) * 0.5 * dt
-            step_disp = node_dx#(node_v_t + node_vf) * (0.5 * self.sub_tstep)
+            step_disp = node_dx
             sum_node_dx[mask_body] += step_disp[mask_body]
 
             # Update Position

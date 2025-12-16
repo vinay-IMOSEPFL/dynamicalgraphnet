@@ -6,7 +6,9 @@ import torch
 import torch.optim as optim
 from tqdm import tqdm
 from torch_geometric.loader import DataLoader
+import torch.nn.functional as F
 import random
+import shutil
 
 
 from case_02_protein.config import MODEL_SETTINGS, SEED, SAVED_MODELS_DIR, DEVICE_ID
@@ -15,7 +17,6 @@ from case_02_protein.dataset import MDAnalysisDataset, calculate_min_max_edge
 from model.model_hist import DynamicsSolver
 from utils.trainer import Trainer
 from case_02_protein.visualization import backbone_to_pdb_file,evaluate_rollout_vis
-#from case_01_human_walk.visualization import visualize_multi_step, create_gif
 
 def find_best_model(model_dir):
     pattern = os.path.join(model_dir, "Val_Loss_*.pth")
@@ -64,6 +65,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test', 'visual'])
     args = parser.parse_args()
+    augment= True
 
     os.environ["CUDA_VISIBLE_DEVICES"] = DEVICE_ID
     set_seed(SEED)
@@ -72,11 +74,11 @@ def main():
 
     # Data Setup
     ds_train = MDAnalysisDataset('adk', partition='train', tmp_dir=MODEL_SETTINGS["data_dir"],
-                                   delta_frame=15, load_cached=True)
+                                   delta_frame=15, load_cached=True, augment=augment)
     ds_val = MDAnalysisDataset('adk', partition='val', tmp_dir=MODEL_SETTINGS["data_dir"],
-                                   delta_frame=15, load_cached=True)
+                                   delta_frame=15, load_cached=True, augment=augment)
     ds_test = MDAnalysisDataset('adk', partition='test', tmp_dir=MODEL_SETTINGS["data_dir"],
-                                   delta_frame=15, load_cached=True)
+                                   delta_frame=15, load_cached=True, augment=augment)
 
     train_loader = DataLoader(ds_train, MODEL_SETTINGS["batch_size"], shuffle=True) 
     val_loader = DataLoader(ds_val, MODEL_SETTINGS["batch_size"], shuffle=False)
@@ -92,7 +94,7 @@ def main():
 
     # Model
     t_step = step_interval * MODEL_SETTINGS["time_step"] if MODEL_SETTINGS["finite_diff"] else step_interval * 1.0
-    node_in_f = 5
+    node_in_f = 6
     edge_in_f = 1
     model = DynamicsSolver(
         node_in_f, 
@@ -109,24 +111,43 @@ def main():
 
     if args.mode == 'train':
         print(f"Training for {MODEL_SETTINGS['epochs']} epochs...")
-        with tqdm(range(1, MODEL_SETTINGS["epochs"]+1)) as pbar:
-            for epoch in pbar:
 
-                #avg_train = train_one_epoch(trainer, train_loader,pbar_desc=f"Epoch {epoch}/{MODEL_SETTINGS['epochs']}")
-                for batch in train_loader:
-                    trainer.train(batch)
+        # ---- CLEAR CHECKPOINT FOLDER ONCE PER TRAIN RUN ----
+        if os.path.exists(trainer.model_dir):
+            shutil.rmtree(trainer.model_dir)
+        os.makedirs(trainer.model_dir, exist_ok=True)
+        # ---------------------------------------------------
+
+        # Rename outer pbar to 'epoch_pbar' for clarity
+        with tqdm(range(1, MODEL_SETTINGS["epochs"]+1), desc="Training Epochs") as epoch_pbar:
+            for epoch in epoch_pbar:
+
+                # --- Inner Loop: Iterate through batches with progress ---
+                # leave=False: Replaces this bar with the next epoch's bar (prevents spamming lines)
+                # batch_pbar = tqdm(train_loader, desc=f"Epoch {epoch}", leave=False)
+                train_one_epoch(trainer, train_loader, pbar_desc="", smooth=0.98)
+
                 
-                # Validation every 1 epochs as per notebook cell 54
+                # for batch in batch_pbar:
+                #     trainer.train(batch)
+                    
+                #     # Update the inner bar immediately with the current batch loss
+                #     batch_pbar.set_postfix({'batch_loss': f'{trainer.loss:.4e}'})
+                
+                # --- Validation ---
                 if epoch % 1 == 0:
                     trainer.test(val_loader, mode='val', epoch=epoch)
                     trainer.test(test_loader, mode='test')
                 
-                pbar.set_postfix({
-                    'Loss': f'{trainer.loss:.4e}',
-                    'Val': f'{trainer.best_val_loss:.4f} (Ep{trainer.best_epoch})'
+                # --- Update Outer Bar ---
+                # Show the best validation metric on the main persistent bar
+                epoch_pbar.set_postfix({
+                    'Last Loss': f'{trainer.loss:.4e}',
+                    'Best Val': f'{trainer.best_val_loss:.4f} (Ep{trainer.best_epoch})'
                 })
         
         best_path = trainer.best_model_path or find_best_model(SAVED_MODELS_DIR)
+
     elif args.mode=='test':
         best_path = find_best_model(SAVED_MODELS_DIR)
         print(f"Loading {best_path}...")
@@ -135,8 +156,15 @@ def main():
 
         for nstep in [1,2,3,4]:
             
-            dataset_eval = MDAnalysisDataset('adk', partition='test', tmp_dir=MODEL_SETTINGS["data_dir"],
-                                      delta_frame=15, load_cached=True, nsteps=nstep)
+            dataset_eval = MDAnalysisDataset(
+                'adk', 
+                partition='test', 
+                tmp_dir=MODEL_SETTINGS["data_dir"],
+                delta_frame=15, 
+                load_cached=True, 
+                nsteps=nstep, augment = True
+                )
+            
             
             dataloader_eval = DataLoader(dataset_eval, batch_size=64, shuffle=False)  
             
@@ -147,26 +175,69 @@ def main():
             print("DONE.")
 
 
-    elif args.mode=='visual':
+    elif args.mode == 'visual':
         best_path = find_best_model(SAVED_MODELS_DIR)
         print(f"Loading {best_path}...")
         model.load_state_dict(torch.load(best_path, map_location=device))
         print('\n EVALUATING...')
+        
+        # Load Dataset
         dataset_eval = MDAnalysisDataset('adk', partition='test', tmp_dir=MODEL_SETTINGS["data_dir"],
                                       delta_frame=15, load_cached=True, nsteps=4)
+        
         indices = random.sample(range(len(dataset_eval)), 5)
-        random_graphs = [dataset_eval[i] for i in indices]
+        selected_graphs = [dataset_eval[i] for i in indices]
         print(f"Selected indices: {indices}")
-        loader = create_dataloaders_from_raw(dataset_eval,200,shuffle=False)
-        visualize_multi_step(
-                            loader,
-                            MODEL_SETTINGS["results_dir"],
-                            trainer.model,
-                            device,
-                            steps=[1,2,3,4],
-                            num_graphs=5
-                            )
-        create_gif(MODEL_SETTINGS["results_dir"])        
+
+        # Define Topology Paths (Adjust as needed)
+        psf_path = "mdanalysis/dataset/adk_equilibrium/adk4AKE.psf"
+        dcd_path = "mdanalysis/dataset/adk_equilibrium/1ake_007-nowater-core-dt240ps.dcd"
+        
+        # 2) Rollout Loop
+        for graph_idx, vis_graph in enumerate(selected_graphs):
+            print(f"\n--- Processing Graph {indices[graph_idx]} ---")
+            
+            # Run Rollout (Returns list of Numpy arrays)
+            pos_pred_list = evaluate_rollout_vis(vis_graph, trainer.model, device, nsteps=4)
+            
+            # Retrieve Ground Truth (Assuming .gt_seq exists from your dataset/augmentation)
+            # If your dataset calls it .seq, change this attribute name
+            pos_gt_list = vis_graph.gt_seq if hasattr(vis_graph, 'gt_seq') else vis_graph.seq
+            
+            for t, (pred_np, gt_t) in enumerate(zip(pos_pred_list, pos_gt_list)):
+                
+                # --- A. Handle Global Node (Crucial!) ---
+                # If pred has 1 more node than GT, it's the global node. Strip it.
+                if pred_np.shape[0] == gt_t.shape[0] + 1:
+                    pred_np_clean = pred_np[:-1] # Remove last row (Global Node)
+                else:
+                    pred_np_clean = pred_np
+                
+                # Ensure GT is numpy for PDB writing, Tensor for Loss
+                gt_np = gt_t.detach().cpu().numpy() if torch.is_tensor(gt_t) else gt_t
+                gt_tensor = torch.tensor(gt_np)
+                pred_tensor = torch.tensor(pred_np_clean)
+                
+                # --- B. Calculate Loss ---
+                mse_val = F.mse_loss(pred_tensor, gt_tensor).item()
+                print(f"Step {t}: MSE = {mse_val:.6f}")
+
+                # --- C. Write PDBs ---
+                # Save Ground Truth
+                gt_fname = f"idx{indices[graph_idx]}_step{t}_gt.pdb"
+                backbone_to_pdb_file(
+                    gt_np,
+                    psf_path, dcd_path,
+                    gt_fname
+                )
+                
+                # Save Prediction
+                pred_fname = f"idx{indices[graph_idx]}_step{t}_pred_mse{mse_val:.4f}.pdb"
+                backbone_to_pdb_file(
+                    pred_np_clean,
+                    psf_path, dcd_path,
+                    pred_fname
+                )
 
     else:
         print("not a valid mode.")
