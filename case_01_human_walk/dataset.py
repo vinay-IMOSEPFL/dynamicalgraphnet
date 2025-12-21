@@ -203,7 +203,7 @@ class HumanDatasetSeq(torch.utils.data.Dataset):
                     if atom_edges[i][j]:
                         rows.append(i)
                         cols.append(j)
-                        edge_attr.append([1])
+                        edge_attr.append([0])
 
 
         edges = [rows, cols] 
@@ -227,8 +227,7 @@ class HumanDatasetSeq(torch.utils.data.Dataset):
         y_pos_end = torch.tensor(y_pos_end)
         y_vel_end = torch.tensor(y_vel_end)
         
-        # Set the node type of feet to one
-        node_type =  torch.ones(pos_t.shape[0],1)
+        node_type =  torch.zeros(pos_t.shape[0],1)
 
         in_graph = Data(edge_index=edge_idx, edge_attr=edge_attr)
         in_graph.pos = pos_t
@@ -307,7 +306,6 @@ def calculate_min_max_edge(train_loader):
         node_vel_tm1 = batched_graph.prev_vel.float()
         
         # Calculate displacements and acceleration changes
-        mask_body = (batched_graph.node_type!=2).squeeze()
         node_dv = (batched_graph.y_dv).float()
         node_dx = (batched_graph.y_dx).float()
         

@@ -10,7 +10,7 @@ import shutil
 from case_01_human_walk.config import MODEL_SETTINGS, SEED, SAVED_MODELS_DIR, DEVICE_ID
 from utils.utils import set_seed, evaluate, evaluate_rollout
 from case_01_human_walk.dataset import HumanDatasetSeq, create_dataloaders, calculate_min_max_edge, create_dataloaders_from_raw
-from model.model_hist import DynamicsSolver
+from model.model_cent import DynamicsSolver
 from utils.trainer import Trainer
 from case_01_human_walk.visualization import visualize_multi_step, create_gif
 

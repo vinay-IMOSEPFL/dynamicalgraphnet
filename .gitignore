@@ -1,0 +1,7 @@
+# Ignore data and results folders anywhere in the project
+**/data/
+**/results/
+
+# Ignore logs and cache (good practice based on your image)
+*.log
+**/__pycache__/*.dcd

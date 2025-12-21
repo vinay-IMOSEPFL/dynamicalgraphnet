@@ -9,7 +9,7 @@ RESULTS_DIR = os.path.join(BASE_DIR, "case_01_human_walk", "results")
 # Settings derived from the notebook
 MODEL_SETTINGS ={
         "batch_size": 100,
-        "epochs": 2000,
+        "epochs": 4000,
         "lr": 5e-4,
         "nf": 64,
         "model": "dgn",
