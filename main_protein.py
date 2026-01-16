@@ -11,7 +11,7 @@ from torch_geometric.loader import DataLoader
 from case_02_protein.config import MODEL_SETTINGS, SEED, SAVED_MODELS_DIR, DEVICE_ID
 from utils.utils import set_seed, evaluate, evaluate_rollout
 from case_02_protein.dataset import MDAnalysisDataset, calculate_min_max_edge
-from model.model_hist import DynamicsSolver
+from model.model import DynamicsSolver
 from utils.trainer import Trainer
 #from case_01_human_walk.visualization import visualize_multi_step, create_gif
 
@@ -70,11 +70,11 @@ def main():
 
     # Data Setup
     ds_train = MDAnalysisDataset('adk', partition='train', tmp_dir=MODEL_SETTINGS["data_dir"],
-                                   delta_frame=15, load_cached=True)
+                                   delta_frame=MODEL_SETTINGS["delta_frame"], load_cached=True)
     ds_val = MDAnalysisDataset('adk', partition='val', tmp_dir=MODEL_SETTINGS["data_dir"],
-                                   delta_frame=15, load_cached=True)
+                                   delta_frame=MODEL_SETTINGS["delta_frame"], load_cached=True)
     ds_test = MDAnalysisDataset('adk', partition='test', tmp_dir=MODEL_SETTINGS["data_dir"],
-                                   delta_frame=15, load_cached=True)
+                                   delta_frame=MODEL_SETTINGS["delta_frame"], load_cached=True)
 
     train_loader = DataLoader(ds_train, MODEL_SETTINGS["batch_size"], shuffle=True) 
     val_loader = DataLoader(ds_val, MODEL_SETTINGS["batch_size"], shuffle=False)
@@ -86,13 +86,13 @@ def main():
         return (stat[0].to(device), stat[1].to(device)) if isinstance(stat, tuple) else stat.to(device)
     train_stats = tuple(to_dev(s) for s in raw_stats)
 
-    step_interval = 15
+    step_interval = MODEL_SETTINGS["delta_frame"]
 
     # Model
-    t_step = step_interval * MODEL_SETTINGS["time_step"] if MODEL_SETTINGS["finite_diff"] else step_interval * 1.0
-    node_in_f = 5
+    t_step = step_interval * MODEL_SETTINGS["time_step"]
+    node_in_f = 4 # one hot encoded not types (atom type N, Cl etc.)
     edge_in_f = 1
-    model = DynamicsSolver(node_in_f, edge_in_f, t_step, train_stats, num_msgs=5, latent_size=128, mlp_layers=MODEL_SETTINGS["n_layers"]).to(device) # num_msgs=4 from cell 22 output/code
+    model = DynamicsSolver(node_in_f, edge_in_f, t_step, train_stats, num_msgs=5, latent_size=128, mlp_layers=MODEL_SETTINGS["n_layers"]).to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=MODEL_SETTINGS["lr"])
     trainer = Trainer(model, optimizer, device, train_stats, step_interval, SAVED_MODELS_DIR)
@@ -106,7 +106,7 @@ def main():
                 for batch in train_loader:
                     trainer.train(batch)
                 
-                # Validation every 5 epochs as per notebook cell 54
+                # Validation every 5 epochs
                 if epoch % 1 == 0:
                     trainer.test(val_loader, mode='val', epoch=epoch)
                     trainer.test(test_loader, mode='test')
@@ -125,9 +125,16 @@ def main():
 
         for nstep in [1,2,3,4]:
             
-            dataset_eval = HumanDataset(partition='test', max_samples=MODEL_SETTINGS["max_testing_samples"], data_dir=MODEL_SETTINGS["data_dir"],nsteps=nstep)
+            dataset_eval = MDAnalysisDataset(
+                'adk', 
+                partition='test', 
+                tmp_dir=MODEL_SETTINGS["data_dir"],
+                load_cached=True, delta_frame=MODEL_SETTINGS["delta_frame"],
+                nsteps=nstep
+                )
             
-            dataloader_eval = create_dataloaders_from_raw(dataset_eval,200,shuffle=False)
+            
+            dataloader_eval = DataLoader(dataset_eval, batch_size=64, shuffle=False)  
             
             eval_error = evaluate_rollout(dataloader_eval, trainer.model, device, nsteps=nstep)
             
@@ -136,22 +143,76 @@ def main():
             print("DONE.")
 
 
-    elif args.mode=='visual':
+    elif args.mode == 'visual':
         best_path = find_best_model(SAVED_MODELS_DIR)
         print(f"Loading {best_path}...")
         model.load_state_dict(torch.load(best_path, map_location=device))
         print('\n EVALUATING...')
-        dataset_eval = HumanDatasetSeq(partition='test', max_samples=MODEL_SETTINGS["max_testing_samples"], data_dir=MODEL_SETTINGS["data_dir"],nsteps=4)
-        loader = create_dataloaders_from_raw(dataset_eval,200,shuffle=False)
-        visualize_multi_step(
-                            loader,
-                            MODEL_SETTINGS["results_dir"],
-                            trainer.model,
-                            device,
-                            steps=[1,2,3,4],
-                            num_graphs=5
-                            )
-        create_gif(MODEL_SETTINGS["results_dir"])        
+        
+        # Load Dataset
+        dataset_eval = MDAnalysisDataset('adk', partition='test', tmp_dir=MODEL_SETTINGS["data_dir"],
+                                      load_cached=True, delta_frame=MODEL_SETTINGS["delta_frame"], nsteps=4)
+        
+        indices = random.sample(range(len(dataset_eval)), 5)
+        selected_graphs = [dataset_eval[i] for i in indices]
+        print(f"Selected indices: {indices}")
+
+        # Define Topology Paths (Adjust as needed)
+        psf_path = "case_02_protein/mdanalysis/dataset/adk_equilibrium/adk4AKE.psf"
+        dcd_path = "case_02_protein/mdanalysis/dataset/adk_equilibrium/1ake_007-nowater-core-dt240ps.dcd"
+        
+        # 2) Rollout Loop
+        for graph_idx, vis_graph in enumerate(selected_graphs):
+            print(f"\n--- Processing Graph {indices[graph_idx]} ---")
+            
+            # Run Rollout (Returns list of Numpy arrays)
+            mask_body = (vis_graph.node_type[:,-1:] != 2) # mask reflected nodes if present
+
+            pos_pred_list = evaluate_rollout_vis(vis_graph, trainer.model, device, nsteps=4)
+            
+            # Retrieve Ground Truth
+            pos_gt_list = vis_graph.gt_seq if hasattr(vis_graph, 'gt_seq') else vis_graph.seq
+            
+            for t, (pred_np, gt_t) in enumerate(zip(pos_pred_list, pos_gt_list)):
+                
+                pred_np_body = pred_np[mask_body]
+                gt_np_body = gt_t[mask_body]
+                
+                # === FIX START: Force Conversion to Numpy for File Writing ===
+                if torch.is_tensor(pred_np_body):
+                    pred_np_body = pred_np_body.detach().cpu().numpy()
+                
+                if torch.is_tensor(gt_t):
+                    gt_np_body = gt_np_body.detach().cpu().numpy()
+
+                # --- B. Calculate Loss (Re-convert to tensor if needed or use existing) ---
+                gt_tensor = torch.tensor(gt_np_body)
+                pred_tensor = torch.tensor(pred_np_body) # Now safe to convert back for loss
+                
+                mse_val = F.mse_loss(pred_tensor, gt_tensor).item()
+                print(f"Step {t}: MSE = {mse_val:.6f}")
+
+                # --- C. Write PDBs ---
+                # Save Ground Truth
+                fpath = os.path.join('case_02_protein','results')
+                os.makedirs(fpath, exist_ok=True)
+
+                gt_fname = f"graph{indices[graph_idx]}_step{t}_gt.pdb"
+                gt_fpath = os.path.join(fpath,gt_fname)
+                backbone_to_pdb_file(
+                    gt_np_body,
+                    psf_path, dcd_path,
+                    gt_fpath
+                )
+                
+                # Save Prediction
+                pred_fname = f"graph{indices[graph_idx]}_step{t}_pred_mse{mse_val:.4f}.pdb"
+                pred_fpath = os.path.join(fpath,pred_fname)
+                backbone_to_pdb_file(
+                    pred_np_body,
+                    psf_path, dcd_path,
+                    pred_fpath
+                )
 
     else:
         print("not a valid mode.")

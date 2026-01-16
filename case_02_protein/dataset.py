@@ -16,19 +16,19 @@ class MDAnalysisDataset(Dataset):
         dataset_name: str,
         partition: str = 'train',
         tmp_dir: str = None,
-        delta_frame: int = 1,
         train_valid_test_ratio=None,
         test_rot: bool = False,
         test_trans: bool = False,
         load_cached: bool = True,
+        delta_frame= 15,
         nsteps=1
-    ):
+        ):
         super().__init__()
         assert load_cached, "This version only supports load_cached=True"
         self.delta_frame = delta_frame
         self.delta_total = nsteps*self.delta_frame
         self.nsteps = nsteps
-        self.p = 1
+        self.time_step = 1
         self.dataset = dataset_name
         self.partition = partition
         self.test_rot = test_rot
@@ -51,13 +51,13 @@ class MDAnalysisDataset(Dataset):
         self.edges = torch.stack(edges_list, dim=0)
 
         # 2) Precompute split-indices over usable frames
-        usable = self.n_frames - self.delta_total-self.p
+        usable = self.n_frames - self.delta_total-self.delta_frame
         n_train = int(self.train_valid_test_ratio[0] * usable)
         n_valid = int(self.train_valid_test_ratio[1] * usable)
         n_test  = usable - n_train - n_valid
-        self.train_start = self.p
-        self.valid_start = self.p + n_train
-        self.test_start  = self.p + n_train + n_valid
+        self.train_start = self.delta_frame
+        self.valid_start = self.delta_frame + n_train
+        self.test_start  = self.delta_frame + n_train + n_valid
 
         self.n_train = n_train
         self.n_valid = n_valid
@@ -83,69 +83,41 @@ class MDAnalysisDataset(Dataset):
         else:
             frame_0 = self.test_start + i
         
-        frame_tm1 = frame_0 - self.p
-        frame_tp1 = frame_0 + self.p
+        frame_tm1 = frame_0 - self.delta_frame
         frame_end = frame_0 + self.delta_total
 
         # Load raw loc and vel from cached files
-        loc_0, vel_0, edge_global, edge_global_attr = torch.load(
+        loc_0, vel_0 = torch.load(
             os.path.join(self.tmp_dir, f'{self.dataset}_{frame_0}.pkl')
         )
-        loc_tp, vel_tp, _, _ = torch.load(
-            os.path.join(self.tmp_dir, f'{self.dataset}_{frame_tp1}.pkl')
-        )
-        loc_end, vel_end, _, _ = torch.load(
+        loc_end, vel_end = torch.load(
             os.path.join(self.tmp_dir, f'{self.dataset}_{frame_end}.pkl')
         )
-        loc_tm, vel_tm, _, _ = torch.load(
+        loc_tm, vel_tm = torch.load(
             os.path.join(self.tmp_dir, f'{self.dataset}_{frame_tm1}.pkl')
         )
 
         seq = []
         for step in range(self.nsteps + 1):
             idx = frame_0 + step * self.delta_frame
-            loc_seq, _, _, _ = torch.load(
+            loc_seq, _,= torch.load(
             os.path.join(self.tmp_dir, f'{self.dataset}_{idx}.pkl')
         )
             seq.append(loc_seq)
 
-        # Stack global edges
-        edge_global = torch.stack(edge_global, dim=0)
-        if edge_global_attr.dim() == 1:
-            edge_global_attr = edge_global_attr.unsqueeze(-1)
 
-        # Combine local and global edges
-        edge_index_combined = torch.cat([self.edges, edge_global], dim=1)
+        node_charges = self.node_feat[:,-1:]
+        node_type = self.node_feat[:,:-1]
 
-        # Build combined edge_attr = [distance, type_flag]
-        ea = self.edge_attr
-        if ea.dim() == 1:
-            ea = ea.unsqueeze(-1)
-        E_l = ea.size(0)
-        E_g = edge_global_attr.size(0)
-
-        dist_combined = torch.vstack((ea, edge_global_attr))
-        zero_block = torch.zeros(E_l, 1)
-        one_block  = torch.ones(E_g,  1)
-        type_flag  = torch.vstack((zero_block, one_block))
-
-        senders,receivers = edge_index_combined
-
-        charges = self.node_feat[:,1:2]
-
-        charges_ij = (charges[senders]*charges[receivers]).view(-1,1)
-
-
-        edge_attr_combined = type_flag#torch.hstack((type_flag, charges_ij))
-
-
+        edge_attr = torch.zeros_like(self.edge_attr).view(-1,1)
 
         # Build PyG Data object
         graph = Data(
-            edge_index=edge_index_combined,
-            edge_attr=edge_attr_combined,
+            edge_index=self.edges,
+            edge_attr=edge_attr,
         )
-        graph.node_type = self.node_feat
+        graph.node_feat = node_charges
+        graph.node_type = node_type
         graph.pos     = loc_0
         graph.vel     = vel_0
         graph.prev_vel  = vel_tm
@@ -153,8 +125,9 @@ class MDAnalysisDataset(Dataset):
         graph.y_dx    = loc_end - loc_0
         graph.end_pos   = loc_end
         graph.end_vel   = vel_end
-        graph.seq     = seq
-        return graph
+        graph.gt_seq     = seq
+
+        return graph   
 
 
 def calculate_min_max_edge(train_loader):
@@ -193,7 +166,6 @@ def calculate_min_max_edge(train_loader):
         node_vel_tm1 = batched_graph.prev_vel.float()
         
         # Calculate displacements and acceleration changes
-        mask_body = (batched_graph.node_type!=2).squeeze()
         node_dv = (batched_graph.y_dv).float()
         node_dx = (batched_graph.y_dx).float()
         

@@ -181,5 +181,5 @@ def create_gif(save_dir):
         
         # Save as infinite-loop GIF
         gif_path = os.path.join(folder_path, 'rollout.gif')
-        imageio.mimsave(gif_path, images, fps=5, loop=0)
+        imageio.mimsave(gif_path, images, fps=2, loop=0)
         print(f"Created {gif_path} with {len(images)} frames")
